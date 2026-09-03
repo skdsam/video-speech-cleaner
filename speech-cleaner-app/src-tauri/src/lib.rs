@@ -1,6 +1,52 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fs::File;
+use std::io::BufReader;
+use std::sync::mpsc::{channel, Sender};
+use std::sync::Mutex;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
+use rodio::{Decoder, OutputStream, Sink, Source};
+
+struct PlayCommand {
+    path: PathBuf,
+    start: Duration,
+    duration: Duration,
+}
+
+static AUDIO_SENDER: Mutex<Option<Sender<PlayCommand>>> = Mutex::new(None);
+
+fn ensure_audio_thread() -> Sender<PlayCommand> {
+    let mut lock = AUDIO_SENDER.lock().unwrap();
+    if let Some(ref tx) = *lock {
+        return tx.clone();
+    }
+
+    let (tx, rx) = channel::<PlayCommand>();
+    std::thread::spawn(move || {
+        let Ok((_stream, stream_handle)) = OutputStream::try_default() else {
+            return;
+        };
+        let Ok(sink) = Sink::try_new(&stream_handle) else {
+            return;
+        };
+
+        while let Ok(cmd) = rx.recv() {
+            sink.stop();
+            if let Ok(file) = File::open(&cmd.path) {
+                let reader = BufReader::new(file);
+                if let Ok(source) = Decoder::new(reader) {
+                    let sliced = source.skip_duration(cmd.start).take_duration(cmd.duration);
+                    sink.append(sliced);
+                    sink.play();
+                }
+            }
+        }
+    });
+
+    *lock = Some(tx.clone());
+    tx
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMetadata {
@@ -372,54 +418,20 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn play_audio_snippet(path: String, start: f64, duration: f64) -> Result<(), String> {
-    // Kill any existing ffplay instance
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "ffplay.exe"])
-        .output();
-
+fn play_audio_snippet(_path: String, start: f64, duration: f64) -> Result<(), String> {
     let cache_dir = PathBuf::from(r"D:\scratch\Remove words\cache");
-    let _ = std::fs::create_dir_all(&cache_dir);
-    let snippet_wav = cache_dir.join("preview_snippet.wav");
+    let preview_wav = cache_dir.join("current_preview.wav");
 
-    let start_str = format!("{:.3}", start.max(0.0));
-    let dur_str = format!("{:.3}", duration.max(0.1));
-
-    // Extract exact snippet using ffmpeg for sample-accurate playback
-    let ext = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-ss", &start_str,
-            "-t", &dur_str,
-            "-i", &path,
-            "-vn",
-            "-c:a", "pcm_s16le",
-            snippet_wav.to_str().unwrap(),
-        ])
-        .output()
-        .map_err(|e| format!("FFmpeg snippet extract failed: {}", e))?;
-
-    if !ext.status.success() {
-        return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&ext.stderr)));
+    if !preview_wav.exists() {
+        return Err("Audio preview cache not found. Please re-analyze the file.".into());
     }
 
-    // Play extracted snippet using ffplay
-    let mut cmd = Command::new("ffplay");
-    cmd.args([
-        "-nodisp",
-        "-autoexit",
-        snippet_wav.to_str().unwrap(),
-    ]);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    cmd.spawn()
-        .map_err(|e| format!("Failed to spawn audio preview: {}", e))?;
+    let tx = ensure_audio_thread();
+    let _ = tx.send(PlayCommand {
+        path: preview_wav,
+        start: Duration::from_secs_f64(start.max(0.0)),
+        duration: Duration::from_secs_f64(duration.max(0.05)),
+    });
 
     Ok(())
 }
