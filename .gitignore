@@ -1,0 +1,40 @@
+# Rust build artifacts
+target/
+**/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node / pnpm artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+dist-ssr/
+*.local
+.pnpm-debug.log*
+
+# Binaries & AI models (large files downloadable via setup script/readme)
+binaries/
+**/binaries/
+models/
+**/models/
+cache/
+**/cache/
+*.bin
+*.exe
+*.dll
+*.zip
+
+# Temporary media & analysis files
+temp_analysis.wav
+*.wav
+*.mp4
+!Speech_Cleaner_Test.mp4
+test_whisper*
+inspect_tokens*
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

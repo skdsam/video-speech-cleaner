@@ -1,0 +1,35 @@
+{
+  "expected_fillers": [
+    {
+      "word": "um",
+      "start_seconds": 4.436,
+      "end_seconds": 5.238,
+      "duration_seconds": 0.802
+    },
+    {
+      "word": "err",
+      "start_seconds": 10.007,
+      "end_seconds": 10.787,
+      "duration_seconds": 0.779
+    },
+    {
+      "word": "erm",
+      "start_seconds": 15.188,
+      "end_seconds": 16.07,
+      "duration_seconds": 0.882
+    },
+    {
+      "word": "uh",
+      "start_seconds": 21.372,
+      "end_seconds": 22.061,
+      "duration_seconds": 0.69
+    },
+    {
+      "word": "umm",
+      "start_seconds": 26.511,
+      "end_seconds": 27.313,
+      "duration_seconds": 0.802
+    }
+  ],
+  "total_audio_duration_seconds": 34.822
+}

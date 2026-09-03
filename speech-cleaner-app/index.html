@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Speech Cleaner</title>
+  </head>
+  <body>
+    <!-- Top Header Bar -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <div>
+          <span class="brand-title">Speech Cleaner</span>
+          <span class="brand-badge">Offline Local AI</span>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-dot"></span>
+        <span>Local Whisper Engine Ready</span>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="app-container">
+      <!-- File Drop & Import Zone -->
+      <section id="dropSection" class="card dropzone">
+        <div class="drop-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" x2="12" y1="3" y2="15"/>
+          </svg>
+        </div>
+        <div class="drop-title">Select or Drag & Drop Media File</div>
+        <div class="drop-subtitle">Supports MP4, MOV, MKV, WebM, WAV, MP3, AAC, FLAC</div>
+        <button id="selectFileBtn" class="btn btn-primary" style="margin-top: 8px;">
+          Choose Video or Audio File
+        </button>
+      </section>
+
+      <!-- Media Metadata & Action Card -->
+      <section id="mediaCard" class="card media-meta-card" style="display: none;">
+        <div class="meta-file-info">
+          <div class="meta-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
+              <line x1="7" y1="2" x2="7" y2="22"/>
+              <line x1="17" y1="2" x2="17" y2="22"/>
+              <line x1="2" y1="12" x2="22" y2="12"/>
+              <line x1="2" y1="7" x2="7" y2="7"/>
+              <line x1="2" y1="17" x2="7" y2="17"/>
+              <line x1="17" y1="17" x2="22" y2="17"/>
+              <line x1="17" y1="7" x2="22" y2="7"/>
+            </svg>
+          </div>
+          <div class="meta-details">
+            <h3 id="metaFileName">video.mp4</h3>
+            <div class="meta-chips">
+              <span class="chip" id="chipDuration">Duration: 00:00</span>
+              <span class="chip" id="chipResolution">1920x1080</span>
+              <span class="chip" id="chipVideoCodec">H.264</span>
+              <span class="chip" id="chipAudioCodec">AAC Stereo</span>
+              <span class="chip" id="chipSampleRate">48 kHz</span>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px;">
+          <button id="changeFileBtn" class="btn btn-secondary">Change File</button>
+          <button id="analyzeBtn" class="btn btn-primary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <polyline points="12 6 12 12 16 14"/>
+            </svg>
+            Analyse Speech Fillers
+          </button>
+        </div>
+      </section>
+
+      <!-- Analysis Progress Bar -->
+      <section id="progressSection" class="card progress-card" style="display: none;">
+        <div class="progress-header">
+          <span id="progressStatus">Extracting audio stream...</span>
+          <span id="progressPercent">40%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="progressBar" class="progress-bar-fill progress-animated" style="width: 40%;"></div>
+        </div>
+      </section>
+
+      <!-- Waveform Visualizer -->
+      <section id="waveformSection" class="card waveform-section" style="display: none;">
+        <div class="waveform-header">
+          <span style="font-weight: 600; font-size: 0.95rem;">Interactive Audio Waveform & Mute Overlays</span>
+          <span style="font-size: 0.8rem; color: var(--text-secondary);">Red bands indicate muted filler regions</span>
+        </div>
+        <div class="waveform-canvas-container">
+          <canvas id="waveformCanvas"></canvas>
+        </div>
+      </section>
+
+      <!-- Review and Detections Table -->
+      <section id="reviewSection" class="card" style="display: none;">
+        <div class="review-header">
+          <div>
+            <h2 style="font-size: 1.1rem; font-weight: 700;">Detected Filler Words</h2>
+            <p style="font-size: 0.82rem; color: var(--text-secondary);" id="reviewSubtext">
+              Review and toggle mutes before exporting
+            </p>
+          </div>
+          <div class="bulk-actions">
+            <button id="selectAllBtn" class="btn btn-secondary btn-xs">Select All</button>
+            <button id="deselectAllBtn" class="btn btn-secondary btn-xs">Deselect All</button>
+            <button id="selectConfidentBtn" class="btn btn-secondary btn-xs">High Confidence Only</button>
+          </div>
+        </div>
+
+        <div id="detectionList" class="detection-list">
+          <!-- Populated dynamically -->
+        </div>
+      </section>
+
+      <!-- Timing Parameters & Options -->
+      <section id="paramsSection" class="params-bar" style="display: none;">
+        <div class="param-group">
+          <label>Pre-padding:</label>
+          <input id="paramPaddingBefore" class="param-input" type="number" value="30" min="0" max="250" />
+          <span>ms</span>
+        </div>
+        <div class="param-group">
+          <label>Post-padding:</label>
+          <input id="paramPaddingAfter" class="param-input" type="number" value="30" min="0" max="250" />
+          <span>ms</span>
+        </div>
+        <div class="param-group">
+          <label>Fade In/Out:</label>
+          <input id="paramFade" class="param-input" type="number" value="8" min="2" max="50" />
+          <span>ms</span>
+        </div>
+        <div class="param-group" style="font-size: 0.8rem; color: var(--accent-emerald);">
+          ✓ Video stream 1:1 copied without re-encoding
+        </div>
+      </section>
+
+      <!-- Export Action Bar -->
+      <section id="exportBar" class="export-bar" style="display: none;">
+        <div class="export-summary">
+          Ready to export: <span id="summaryMuteCount" class="export-highlight">5</span> regions will be muted to complete silence.
+        </div>
+        <button id="exportBtn" class="btn btn-success">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" x2="12" y1="15" y2="3"/>
+          </svg>
+          Export Cleaned Video
+        </button>
+      </section>
+    </main>
+
+    <!-- Audio Element for Previews -->
+    <audio id="previewAudio" style="display: none;"></audio>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
