@@ -329,7 +329,8 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
   if (btn) {
     const originalHtml = btn.innerHTML;
     btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> Playing...`;
-    btn.style.background = "#6366F1";
+    btn.style.background = "var(--accent-blue)";
+    btn.style.borderColor = "var(--accent-blue)";
     btn.style.color = "#FFF";
 
     setTimeout(() => {
@@ -449,7 +450,8 @@ function updateTransportUI() {
   if (isPlaying) {
     transportPlayIcon.innerHTML = `<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>`;
     transportPlayText.innerText = "Pause";
-    transportPlayBtn.style.background = "#6366F1";
+    transportPlayBtn.style.background = "var(--accent-blue)";
+    transportPlayBtn.style.borderColor = "var(--accent-blue)";
     transportPlayBtn.style.color = "#FFF";
   } else {
     transportPlayIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
