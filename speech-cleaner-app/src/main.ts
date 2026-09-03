@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 interface MediaMetadata {
@@ -30,6 +31,11 @@ interface AnalysisResult {
   peaks: number[];
 }
 
+interface ProgressPayload {
+  percent: number;
+  stage: string;
+}
+
 let currentMetadata: MediaMetadata | null = null;
 let currentFillers: FillerItem[] = [];
 let audioPeaks: number[] = [];
@@ -53,6 +59,7 @@ const progressSection = document.getElementById("progressSection") as HTMLElemen
 const progressStatus = document.getElementById("progressStatus") as HTMLElement;
 const progressPercent = document.getElementById("progressPercent") as HTMLElement;
 const progressBar = document.getElementById("progressBar") as HTMLElement;
+const cancelAnalysisBtn = document.getElementById("cancelAnalysisBtn") as HTMLButtonElement;
 
 // Middle Workspace (Video & Regions)
 const workspaceRow = document.getElementById("workspaceRow") as HTMLElement;
@@ -189,12 +196,13 @@ async function loadMediaFile(filePath: string) {
     chipAudioCodec.innerText = meta.audio_codec ? `Audio: ${meta.audio_codec}` : "Unknown Audio";
     chipSampleRate.innerText = meta.sample_rate ? `${(meta.sample_rate / 1000).toFixed(1)} kHz` : "";
 
-    // Synchronize video player source
+    // Synchronize video player source via Tauri asset protocol
     if (meta.video_codec) {
-      // In Windows WebView2/Tauri, file protocol handles local MP4 video decoding directly
-      videoPreviewPlayer.src = `file://${filePath.replace(/\\/g, "/")}`;
+      // In Tauri 2 with asset protocol enabled, convertFileSrc converts absolute Windows paths to asset:// URLs
+      videoPreviewPlayer.src = convertFileSrc(filePath);
       videoPreviewPlayer.style.display = "block";
       videoPlaceholder.style.display = "none";
+      videoPreviewPlayer.load();
     } else {
       videoPreviewPlayer.style.display = "none";
       videoPlaceholder.style.display = "block";
@@ -222,6 +230,26 @@ toggleVideoSizeBtn.addEventListener("click", () => {
 });
 
 // -------------------------------------------------------------
+// Live Analysis Event Listener
+// -------------------------------------------------------------
+listen<ProgressPayload>("analysis-progress", (event) => {
+  const { percent, stage } = event.payload;
+  progressPercent.innerText = `${Math.round(percent)}%`;
+  progressBar.style.width = `${percent}%`;
+  progressStatus.innerText = stage;
+});
+
+cancelAnalysisBtn.addEventListener("click", async () => {
+  try {
+    cancelAnalysisBtn.disabled = true;
+    cancelAnalysisBtn.innerText = "Cancelling...";
+    await invoke("cancel_analysis");
+  } catch (err) {
+    console.error("Cancel analysis failed:", err);
+  }
+});
+
+// -------------------------------------------------------------
 // Speech Filler Analysis
 // -------------------------------------------------------------
 analyzeBtn.addEventListener("click", async () => {
@@ -229,10 +257,18 @@ analyzeBtn.addEventListener("click", async () => {
 
   try {
     analyzeBtn.disabled = true;
+    cancelAnalysisBtn.disabled = false;
+    cancelAnalysisBtn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+      Cancel
+    `;
     progressSection.style.display = "flex";
-    progressStatus.innerText = "Extracting audio & running local whisper.cpp...";
-    progressPercent.innerText = "45%";
-    progressBar.style.width = "45%";
+    progressStatus.innerText = "Initializing speech model & audio stream...";
+    progressPercent.innerText = "2%";
+    progressBar.style.width = "2%";
     engineStatusLabel.innerText = "Whisper Analysing...";
 
     const result = await invoke<AnalysisResult>("analyze_audio", { path: currentMetadata.file_path });
@@ -241,16 +277,20 @@ analyzeBtn.addEventListener("click", async () => {
 
     progressPercent.innerText = "100%";
     progressBar.style.width = "100%";
+    progressStatus.innerText = `Detected ${currentFillers.length} filler words! Loading workstation...`;
     engineStatusLabel.innerText = "Analysis Complete";
 
     setTimeout(() => {
       progressSection.style.display = "none";
       displayWorkstation();
-    }, 300);
+    }, 400);
   } catch (err: any) {
-    alert("Analysis failed: " + (err.message || err));
+    const msg = String(err.message || err);
+    if (!msg.includes("cancelled")) {
+      alert("Analysis failed: " + msg);
+    }
     progressSection.style.display = "none";
-    engineStatusLabel.innerText = "Analysis Failed";
+    engineStatusLabel.innerText = msg.includes("cancelled") ? "Analysis Cancelled" : "Analysis Failed";
   } finally {
     analyzeBtn.disabled = false;
   }
@@ -948,7 +988,8 @@ function renderFillersList() {
     });
 
     const prevBtn = el.querySelector(".btn-preview") as HTMLButtonElement;
-    prevBtn.addEventListener("click", () => {
+    prevBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
       previewRegion(item.start, item.end, prevBtn);
     });
 
@@ -959,6 +1000,20 @@ function renderFillersList() {
       renderFillersList();
       updateSummary();
       renderAllViews();
+    });
+
+    // Clicking anywhere on the item row navigates the timeline playhead & video straight to the exact detected region
+    el.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).tagName === "INPUT" || (e.target as HTMLElement).closest("button")) {
+        return;
+      }
+      seekTo(item.start);
+      // Ensure the region is scrolled into view if zoomed in
+      if (zoomLevel > 1.0 && currentMetadata) {
+        const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
+        const targetPx = (item.start / currentMetadata.duration) * totalTrackW;
+        waveformViewport.scrollLeft = Math.max(0, targetPx - waveformViewport.clientWidth / 2);
+      }
     });
 
     detectionList.appendChild(el);
@@ -1126,8 +1181,12 @@ window.addEventListener("resize", () => {
   }
 });
 
-// Automatically load the test file if present
-window.addEventListener("DOMContentLoaded", () => {
+// Automatically load the test file if present in dev environment
+window.addEventListener("DOMContentLoaded", async () => {
   const testFile = "D:\\scratch\\Remove words\\Speech_Cleaner_Test.mp4";
-  loadMediaFile(testFile);
+  try {
+    await loadMediaFile(testFile);
+  } catch {
+    // If not found, stay on file drop screen
+  }
 });

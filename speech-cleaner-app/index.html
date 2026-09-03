@@ -89,11 +89,20 @@
       <!-- Analysis Progress Bar -->
       <section id="progressSection" class="card progress-card" style="display: none;">
         <div class="progress-header">
-          <span id="progressStatus">Extracting audio stream...</span>
-          <span id="progressPercent">50%</span>
+          <div class="progress-info">
+            <span id="progressStatus">Extracting audio stream...</span>
+            <span id="progressPercent" class="progress-badge">0%</span>
+          </div>
+          <button id="cancelAnalysisBtn" class="btn btn-secondary btn-xs" title="Cancel Analysis">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            Cancel
+          </button>
         </div>
         <div class="progress-bar-bg">
-          <div id="progressBar" class="progress-bar-fill" style="width: 50%;"></div>
+          <div id="progressBar" class="progress-bar-fill" style="width: 0%;"></div>
         </div>
       </section>
 

@@ -262,8 +262,51 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressPayload {
+    pub percent: f64,
+    pub stage: String,
+}
+
+static CANCEL_REQUESTED: Mutex<bool> = Mutex::new(false);
+static ACTIVE_CHILD_PID: Mutex<Option<u32>> = Mutex::new(None);
+
 #[tauri::command]
-fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
+fn cancel_analysis() -> Result<(), String> {
+    if let Ok(mut cancel) = CANCEL_REQUESTED.lock() {
+        *cancel = true;
+    }
+    if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
+        if let Some(pid) = *pid_guard {
+            // Kill child process on Windows
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+            *pid_guard = None;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
+    use tauri::Emitter;
+    use std::io::{BufRead, BufReader};
+
+    // Reset cancel state
+    if let Ok(mut cancel) = CANCEL_REQUESTED.lock() {
+        *cancel = false;
+    }
+
+    let emit_prog = |percent: f64, stage: &str| {
+        let _ = app.emit("analysis-progress", ProgressPayload {
+            percent,
+            stage: stage.to_string(),
+        });
+    };
+
+    emit_prog(2.0, "Inspecting media metadata...");
+
     let meta = inspect_media(path.clone())?;
     let (whisper_bin, model_path) = resolve_paths()?;
 
@@ -274,8 +317,15 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
     let preview_wav = cache_dir.join("current_preview.wav");
     let out_stem = cache_dir.join("whisper_res");
 
-    // Extract 16kHz mono WAV for Whisper
-    let ext_out = Command::new("ffmpeg")
+    emit_prog(5.0, "Extracting audio stream for AI speech model...");
+
+    // Check cancellation
+    if *CANCEL_REQUESTED.lock().unwrap() {
+        return Err("Analysis cancelled by user".into());
+    }
+
+    // Extract 16kHz mono WAV for Whisper with progress tracking
+    let mut ffmpeg_child = Command::new("ffmpeg")
         .args([
             "-y",
             "-i", &path,
@@ -284,14 +334,31 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
             "-c:a", "pcm_s16le",
             temp_wav.to_str().unwrap(),
         ])
-        .output()
+        .spawn()
         .map_err(|e| format!("FFmpeg analysis wav extract failed: {}", e))?;
 
-    if !ext_out.status.success() {
-        return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&ext_out.stderr)));
+    if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
+        *pid_guard = Some(ffmpeg_child.id());
     }
 
-    // Extract normalized stereo WAV for frontend playback & waveform
+    let ffmpeg_status = ffmpeg_child.wait()
+        .map_err(|e| format!("Failed waiting for FFmpeg: {}", e))?;
+
+    if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
+        *pid_guard = None;
+    }
+
+    if *CANCEL_REQUESTED.lock().unwrap() {
+        return Err("Analysis cancelled by user".into());
+    }
+
+    if !ffmpeg_status.success() {
+        return Err("FFmpeg failed to extract analysis audio".into());
+    }
+
+    emit_prog(15.0, "Extracting preview audio track...");
+
+    // Extract normalized stereo WAV for frontend playback & waveform peak extraction
     let _ = Command::new("ffmpeg")
         .args([
             "-y",
@@ -303,20 +370,79 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
         ])
         .output();
 
-    // Run Whisper
-    let whisper_res = Command::new(&whisper_bin)
-        .args([
-            "-m", model_path.to_str().unwrap(),
-            "-f", temp_wav.to_str().unwrap(),
-            "-ojf",
-            "-of", out_stem.to_str().unwrap(),
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run whisper: {}", e))?;
-
-    if !whisper_res.status.success() {
-        return Err(format!("Whisper error: {}", String::from_utf8_lossy(&whisper_res.stderr)));
+    if *CANCEL_REQUESTED.lock().unwrap() {
+        return Err("Analysis cancelled by user".into());
     }
+
+    emit_prog(20.0, "Running AI Whisper speech analysis (0%)...");
+
+    // Determine thread count (default to 8 for fast desktop inference)
+    let threads_str = "8";
+
+    // Run Whisper with prompt biasing for maximum recall of hesitation filler words,
+    // plus -pp (print-progress) to capture real-time transcription percentages.
+    let mut whisper_cmd = Command::new(&whisper_bin);
+    whisper_cmd.args([
+        "-m", model_path.to_str().unwrap(),
+        "-f", temp_wav.to_str().unwrap(),
+        "-t", threads_str,
+        "-ojf",
+        "-of", out_stem.to_str().unwrap(),
+        "-pp",
+        "--prompt", "Um, uh, erm, ah, er, hesitation, filler words, stuttering, pause.",
+    ]);
+    whisper_cmd.stdout(std::process::Stdio::piped());
+    whisper_cmd.stderr(std::process::Stdio::piped());
+
+    let mut whisper_child = whisper_cmd.spawn()
+        .map_err(|e| format!("Failed to spawn whisper: {}", e))?;
+
+    if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
+        *pid_guard = Some(whisper_child.id());
+    }
+
+    // Read stderr/stdout line by line for -pp progress
+    if let Some(stderr) = whisper_child.stderr.take() {
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line_res in reader.lines() {
+                if let Ok(line) = line_res {
+                    // Lines like: "whisper_print_progress_callback: progress =  49%"
+                    if line.contains("progress =") {
+                        if let Some(pct_str) = line.split("progress =").nth(1) {
+                            let clean_pct: String = pct_str.chars().filter(|c| c.is_digit(10)).collect();
+                            if let Ok(num) = clean_pct.parse::<f64>() {
+                                // Map 0..100% of whisper to 20%..90% of overall progress
+                                let overall = 20.0 + (num / 100.0) * 70.0;
+                                let _ = app_handle.emit("analysis-progress", ProgressPayload {
+                                    percent: overall.min(90.0),
+                                    stage: format!("AI Speech Analysis ({:.0}%)...", num),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let whisper_res = whisper_child.wait()
+        .map_err(|e| format!("Failed waiting for whisper: {}", e))?;
+
+    if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
+        *pid_guard = None;
+    }
+
+    if *CANCEL_REQUESTED.lock().unwrap() {
+        return Err("Analysis cancelled by user".into());
+    }
+
+    if !whisper_res.success() {
+        return Err("Whisper speech model encountered an error during inference.".into());
+    }
+
+    emit_prog(92.0, "Parsing detected speech elements...");
 
     let json_file = out_stem.with_extension("json");
     let json_text = std::fs::read_to_string(&json_file)
@@ -325,8 +451,10 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
     let parsed: WhisperOutput = serde_json::from_str(&json_text)
         .map_err(|e| format!("Failed to parse whisper json: {}", e))?;
 
-    // Filler targets
-    let filler_targets = ["um", "umm", "uh", "uhh", "erm", "err", "er"];
+    // Comprehensive filler target list
+    let filler_targets = [
+        "um", "umm", "uh", "uhh", "erm", "err", "er", "ah", "ahh", "hmm", "hm"
+    ];
     let mut fillers = Vec::new();
     let mut id_counter = 1;
 
@@ -363,24 +491,28 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
             }
             let tok_clean: String = tok.text.trim().to_lowercase().chars().filter(|c| c.is_alphabetic()).collect();
             if filler_targets.contains(&tok_clean.as_str()) {
-                let start = tok.offsets.from as f64 / 1000.0;
-                let end = tok.offsets.to as f64 / 1000.0;
-                if end > start {
-                    fillers.push(FillerItem {
-                        id: format!("filler_{}", id_counter),
-                        word: tok_clean,
-                        start,
-                        end,
-                        confidence: tok.p,
-                        enabled: true,
-                    });
-                    id_counter += 1;
+                let mut start = tok.offsets.from as f64 / 1000.0;
+                let mut end = tok.offsets.to as f64 / 1000.0;
+                // If Whisper gave a zero-length timestamp for this token, expand it slightly using segment context
+                if (end - start).abs() < 0.01 {
+                    end = start + 0.35;
                 }
+                fillers.push(FillerItem {
+                    id: format!("filler_{}", id_counter),
+                    word: tok_clean,
+                    start,
+                    end,
+                    confidence: tok.p,
+                    enabled: true,
+                });
+                id_counter += 1;
             }
         }
     }
 
-    // Extract real peak envelope from preview_wav (downsampled to ~2000 points for silky smooth rendering at all zoom levels)
+    emit_prog(96.0, "Extracting audio waveform geometry...");
+
+    // Extract real peak envelope from preview_wav (downsampled to 2400 points for silky smooth rendering at all zoom levels)
     let mut peaks: Vec<f32> = Vec::new();
     if let Ok(mut reader) = hound::WavReader::open(&preview_wav) {
         let spec = reader.spec();
@@ -414,6 +546,8 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
     if peaks.is_empty() {
         peaks = vec![0.3; 200];
     }
+
+    emit_prog(100.0, "Analysis complete!");
 
     Ok(AnalysisResult {
         metadata: meta,
@@ -509,6 +643,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             inspect_media,
             analyze_audio,
+            cancel_analysis,
             export_video,
             play_audio_snippet,
             stop_audio
