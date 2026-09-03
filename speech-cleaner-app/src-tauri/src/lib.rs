@@ -371,6 +371,39 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
     Ok(format!("Export complete: {}", req.output_path))
 }
 
+#[tauri::command]
+fn play_audio_snippet(path: String, start: f64, duration: f64) -> Result<(), String> {
+    // Kill any existing ffplay instance so multiple preview clicks don't overlap
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "ffplay.exe"])
+        .output();
+
+    let start_str = format!("{:.3}", start.max(0.0));
+    let dur_str = format!("{:.3}", duration.max(0.1));
+
+    // Spawn ffplay in background without UI window
+    let mut cmd = Command::new("ffplay");
+    cmd.args([
+        "-nodisp",
+        "-autoexit",
+        "-ss", &start_str,
+        "-t", &dur_str,
+        &path,
+    ]);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    cmd.spawn()
+        .map_err(|e| format!("Failed to spawn audio preview: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -379,7 +412,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             inspect_media,
             analyze_audio,
-            export_video
+            export_video,
+            play_audio_snippet
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

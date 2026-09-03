@@ -216,7 +216,7 @@ function renderFillersList() {
     // Preview event
     const prevBtn = el.querySelector(".btn-preview") as HTMLButtonElement;
     prevBtn.addEventListener("click", () => {
-      previewRegion(item.start, item.end);
+      previewRegion(item.start, item.end, prevBtn);
     });
 
     detectionList.appendChild(el);
@@ -252,15 +252,39 @@ selectConfidentBtn.addEventListener("click", () => {
   renderWaveform();
 });
 
-// Audio Preview with custom gain/mute preview simulation
-function previewRegion(start: number, end: number) {
+// Audio Preview with native ffplay snippet playback
+async function previewRegion(start: number, end: number, btn?: HTMLButtonElement) {
   if (!currentMetadata) return;
-  // If previewAudio has a valid src, play snippet with 1s pre-roll
-  const playStart = Math.max(0, start - 1.0);
-  const playEnd = Math.min(currentMetadata.duration, end + 1.0);
 
-  // In desktop app, play the preview snippet
-  console.log(`Previewing filler: ${start.toFixed(2)}s to ${end.toFixed(2)}s (window: ${playStart.toFixed(2)}s - ${playEnd.toFixed(2)}s)`);
+  // 1.5 second context before and after filler
+  const preRoll = 1.2;
+  const postRoll = 1.2;
+  const playStart = Math.max(0, start - preRoll);
+  const playEnd = Math.min(currentMetadata.duration, end + postRoll);
+  const playDuration = Math.max(0.5, playEnd - playStart);
+
+  if (btn) {
+    const originalHtml = btn.innerHTML;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> Playing...`;
+    btn.style.background = "#6366F1";
+    btn.style.color = "#FFF";
+
+    setTimeout(() => {
+      btn.innerHTML = originalHtml;
+      btn.style.background = "";
+      btn.style.color = "";
+    }, playDuration * 1000);
+  }
+
+  try {
+    await invoke("play_audio_snippet", {
+      path: currentMetadata.file_path,
+      start: playStart,
+      duration: playDuration
+    });
+  } catch (err: any) {
+    console.error("Preview audio error:", err);
+  }
 }
 
 // Waveform rendering
