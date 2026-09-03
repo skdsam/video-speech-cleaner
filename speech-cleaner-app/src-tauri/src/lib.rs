@@ -8,21 +8,24 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use rodio::{Decoder, OutputStream, Sink, Source};
 
-struct PlayCommand {
-    path: PathBuf,
-    start: Duration,
-    duration: Duration,
+enum AudioCommand {
+    Play {
+        path: PathBuf,
+        start: Duration,
+        duration: Option<Duration>,
+    },
+    Stop,
 }
 
-static AUDIO_SENDER: Mutex<Option<Sender<PlayCommand>>> = Mutex::new(None);
+static AUDIO_SENDER: Mutex<Option<Sender<AudioCommand>>> = Mutex::new(None);
 
-fn ensure_audio_thread() -> Sender<PlayCommand> {
+fn ensure_audio_thread() -> Sender<AudioCommand> {
     let mut lock = AUDIO_SENDER.lock().unwrap();
     if let Some(ref tx) = *lock {
         return tx.clone();
     }
 
-    let (tx, rx) = channel::<PlayCommand>();
+    let (tx, rx) = channel::<AudioCommand>();
     std::thread::spawn(move || {
         let Ok((_stream, stream_handle)) = OutputStream::try_default() else {
             return;
@@ -33,12 +36,24 @@ fn ensure_audio_thread() -> Sender<PlayCommand> {
 
         while let Ok(cmd) = rx.recv() {
             sink.stop();
-            if let Ok(file) = File::open(&cmd.path) {
-                let reader = BufReader::new(file);
-                if let Ok(source) = Decoder::new(reader) {
-                    let sliced = source.skip_duration(cmd.start).take_duration(cmd.duration);
-                    sink.append(sliced);
-                    sink.play();
+            match cmd {
+                AudioCommand::Play { path, start, duration } => {
+                    if let Ok(file) = File::open(&path) {
+                        let reader = BufReader::new(file);
+                        if let Ok(source) = Decoder::new(reader) {
+                            if let Some(dur) = duration {
+                                let sliced = source.skip_duration(start).take_duration(dur);
+                                sink.append(sliced);
+                            } else {
+                                let sliced = source.skip_duration(start);
+                                sink.append(sliced);
+                            }
+                            sink.play();
+                        }
+                    }
+                }
+                AudioCommand::Stop => {
+                    sink.stop();
                 }
             }
         }
@@ -427,12 +442,25 @@ fn play_audio_snippet(_path: String, start: f64, duration: f64) -> Result<(), St
     }
 
     let tx = ensure_audio_thread();
-    let _ = tx.send(PlayCommand {
+    let dur_opt = if duration > 0.0 {
+        Some(Duration::from_secs_f64(duration))
+    } else {
+        None
+    };
+
+    let _ = tx.send(AudioCommand::Play {
         path: preview_wav,
         start: Duration::from_secs_f64(start.max(0.0)),
-        duration: Duration::from_secs_f64(duration.max(0.05)),
+        duration: dur_opt,
     });
 
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_audio() -> Result<(), String> {
+    let tx = ensure_audio_thread();
+    let _ = tx.send(AudioCommand::Stop);
     Ok(())
 }
 
@@ -445,7 +473,8 @@ pub fn run() {
             inspect_media,
             analyze_audio,
             export_video,
-            play_audio_snippet
+            play_audio_snippet,
+            stop_audio
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

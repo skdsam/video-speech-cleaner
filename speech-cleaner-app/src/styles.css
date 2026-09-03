@@ -321,20 +321,219 @@ body {
   align-items: center;
 }
 
+.timeline-hint {
+  font-size: 0.76rem;
+  color: var(--accent-cyan);
+  opacity: 0.85;
+  background: rgba(6, 182, 212, 0.1);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+.timeline-time-display {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.time-current {
+  color: var(--accent-cyan);
+}
+
+.time-total {
+  color: var(--text-secondary);
+}
+
 .waveform-canvas-container {
   position: relative;
   width: 100%;
-  height: 120px;
-  background: rgba(10, 15, 25, 0.8);
+  height: 130px;
+  background: rgba(10, 15, 25, 0.85);
   border-radius: var(--radius-md);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   overflow: hidden;
+  cursor: crosshair;
 }
 
 #waveformCanvas {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* Playhead Line */
+.playhead-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #06B6D4;
+  box-shadow: 0 0 10px #06B6D4, 0 0 20px rgba(6, 182, 212, 0.8);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.playhead-line::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -5px;
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid #06B6D4;
+}
+
+/* Timeline Selection Drag */
+.timeline-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(244, 63, 94, 0.35);
+  border: 1px solid #F43F5E;
+  pointer-events: none;
+  z-index: 8;
+}
+
+/* Timeline Hover Tooltip */
+.timeline-tooltip {
+  position: absolute;
+  top: 6px;
+  background: rgba(15, 23, 42, 0.9);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  pointer-events: none;
+  z-index: 15;
+  transform: translateX(-50%);
+}
+
+/* Transport Controls Bar */
+.transport-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-md);
+}
+
+.transport-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transport-scrub-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.timeline-scrubber {
+  width: 100%;
+  -webkit-appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.timeline-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.8);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.timeline-scrubber::-webkit-slider-thumb:hover {
+  transform: scale(1.25);
+}
+
+/* Manual Add Panel */
+.manual-add-panel {
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  animation: slideDown 0.2s ease;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.manual-add-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.input-field-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.text-input {
+  width: 140px;
+}
+
+.num-input {
+  width: 80px;
+}
+
+.custom-badge {
+  background: rgba(168, 85, 247, 0.2);
+  color: #C084FC;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.btn-delete-item {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-delete-item:hover {
+  color: #F43F5E;
+  background: rgba(244, 63, 94, 0.1);
 }
 
 /* Detection Table */
