@@ -107,9 +107,9 @@
       </section>
 
       <!-- Middle Workstation Row: Synchronized Video Monitor & Mute Regions List -->
-      <section id="workspaceRow" class="workspace-row" style="display: none;">
+      <section id="workspaceRow" class="workspace-row video-hidden" style="display: none;">
         <!-- Synchronized Video Preview Dock -->
-        <div id="videoMonitorContainer" class="card video-monitor-card">
+        <div id="videoMonitorContainer" class="card video-monitor-card" style="display: none;">
           <div class="panel-header">
             <div class="panel-title">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -119,13 +119,16 @@
               Synchronised Video Monitor
             </div>
             <div class="monitor-controls">
+              <button id="toggleVideoVisibilityBtn" class="btn btn-secondary btn-xs" title="Hide Video Monitor">
+                Hide Video
+              </button>
               <button id="toggleVideoSizeBtn" class="btn btn-secondary btn-xs" title="Toggle Compact / Expanded Video">
                 Expand View
               </button>
             </div>
           </div>
           <div class="video-viewport-wrapper">
-            <video id="videoPreviewPlayer" class="video-viewport" playsinline></video>
+            <video id="videoPreviewPlayer" class="video-viewport" playsinline muted></video>
             <div id="videoPlaceholder" class="video-placeholder">
               <span>Audio track loaded (No video stream)</span>
             </div>
@@ -143,6 +146,13 @@
               Detected Mute Regions (<span id="regionsCountBadge">0</span>)
             </div>
             <div class="bulk-actions">
+              <button id="showVideoBtn" class="btn btn-secondary btn-xs" style="display: none;" title="Show Synchronized Video Monitor">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -1px; margin-right: 2px;">
+                  <polygon points="23 7 16 12 23 17 23 7"/>
+                  <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                </svg>
+                Show Video
+              </button>
               <button id="selectAllBtn" class="btn btn-secondary btn-xs">All</button>
               <button id="deselectAllBtn" class="btn btn-secondary btn-xs">None</button>
               <button id="selectConfidentBtn" class="btn btn-secondary btn-xs">High Conf</button>

@@ -63,9 +63,13 @@ const cancelAnalysisBtn = document.getElementById("cancelAnalysisBtn") as HTMLBu
 
 // Middle Workspace (Video & Regions)
 const workspaceRow = document.getElementById("workspaceRow") as HTMLElement;
+const videoMonitorContainer = document.getElementById("videoMonitorContainer") as HTMLElement;
 const videoPreviewPlayer = document.getElementById("videoPreviewPlayer") as HTMLVideoElement;
 const videoPlaceholder = document.getElementById("videoPlaceholder") as HTMLElement;
 const toggleVideoSizeBtn = document.getElementById("toggleVideoSizeBtn") as HTMLButtonElement;
+const toggleVideoVisibilityBtn = document.getElementById("toggleVideoVisibilityBtn") as HTMLButtonElement;
+const showVideoBtn = document.getElementById("showVideoBtn") as HTMLButtonElement;
+let isVideoVisible = false; // Hidden by default as requested
 
 const reviewSection = document.getElementById("reviewSection") as HTMLElement;
 const regionsCountBadge = document.getElementById("regionsCountBadge") as HTMLElement;
@@ -200,13 +204,20 @@ async function loadMediaFile(filePath: string) {
     if (meta.video_codec) {
       // In Tauri 2 with asset protocol enabled, convertFileSrc converts absolute Windows paths to asset:// URLs
       videoPreviewPlayer.src = convertFileSrc(filePath);
+      videoPreviewPlayer.muted = true;
+      videoPreviewPlayer.volume = 0;
       videoPreviewPlayer.style.display = "block";
       videoPlaceholder.style.display = "none";
       videoPreviewPlayer.load();
     } else {
+      videoPreviewPlayer.src = "";
       videoPreviewPlayer.style.display = "none";
       videoPlaceholder.style.display = "block";
     }
+
+    // Default to hidden video viewport as requested
+    isVideoVisible = false;
+    applyVideoVisibility();
 
     // Reset workspace view until analysis
     workspaceRow.style.display = "none";
@@ -220,6 +231,46 @@ async function loadMediaFile(filePath: string) {
     mediaCard.style.display = "none";
   }
 }
+
+function applyVideoVisibility() {
+  const hasVideo = !!(currentMetadata && currentMetadata.video_codec);
+  if (!hasVideo) {
+    videoMonitorContainer.style.display = "none";
+    workspaceRow.classList.add("video-hidden");
+    showVideoBtn.style.display = "none";
+    return;
+  }
+
+  if (isVideoVisible) {
+    videoMonitorContainer.style.display = "flex";
+    workspaceRow.classList.remove("video-hidden");
+    showVideoBtn.style.display = "none";
+    // Sync current playhead time when made visible
+    if (videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
+      videoPreviewPlayer.currentTime = currentTime;
+      if (isPlaying) {
+        videoPreviewPlayer.play().catch(() => {});
+      }
+    }
+  } else {
+    videoMonitorContainer.style.display = "none";
+    workspaceRow.classList.add("video-hidden");
+    showVideoBtn.style.display = "inline-flex";
+    // Pause video to free resources and ensure zero audio leaks
+    videoPreviewPlayer.pause();
+  }
+  renderAllViews();
+}
+
+toggleVideoVisibilityBtn.addEventListener("click", () => {
+  isVideoVisible = false;
+  applyVideoVisibility();
+});
+
+showVideoBtn.addEventListener("click", () => {
+  isVideoVisible = true;
+  applyVideoVisibility();
+});
 
 // Video Size Expansion Toggle
 toggleVideoSizeBtn.addEventListener("click", () => {
@@ -304,6 +355,9 @@ function displayWorkstation() {
   exportBar.style.display = "flex";
   playheadLine.style.display = "block";
 
+  // Enforce hidden by default video dock
+  applyVideoVisibility();
+
   if (currentMetadata) {
     totalTimeDisplay.innerText = formatTimecode(currentMetadata.duration);
     timelineScrubber.max = currentMetadata.duration.toString();
@@ -337,7 +391,7 @@ async function playAudio(fromTime?: number) {
       duration: 0.0, // 0.0 = continuous playback
     });
 
-    if (videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
+    if (isVideoVisible && videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
       videoPreviewPlayer.currentTime = seekTime;
       videoPreviewPlayer.play().catch(() => {});
     }
@@ -380,8 +434,8 @@ function seekTo(timeInSeconds: number) {
   const clamped = Math.max(0, Math.min(currentMetadata.duration, timeInSeconds));
   currentTime = clamped;
 
-  // Keep video synchronized frame-by-frame
-  if (videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
+  // Keep video synchronized frame-by-frame if visible
+  if (isVideoVisible && videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
     videoPreviewPlayer.currentTime = clamped;
   }
 

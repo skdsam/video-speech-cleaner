@@ -401,7 +401,17 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
         *pid_guard = Some(whisper_child.id());
     }
 
-    // Read stderr/stdout line by line for -pp progress
+    // Drain stdout in background thread so the process pipe never fills up and deadlocks
+    if let Some(stdout) = whisper_child.stdout.take() {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for _ in reader.lines() {
+                // discard or log transcript preview
+            }
+        });
+    }
+
+    // Read stderr line by line for -pp progress
     if let Some(stderr) = whisper_child.stderr.take() {
         let app_handle = app.clone();
         std::thread::spawn(move || {

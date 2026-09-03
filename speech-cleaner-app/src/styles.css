@@ -349,10 +349,15 @@ body {
   grid-template-columns: 460px 1fr;
   gap: 12px;
   align-items: stretch;
+  transition: grid-template-columns 0.2s ease;
 }
 
 .workspace-row.video-expanded {
   grid-template-columns: 680px 1fr;
+}
+
+.workspace-row.video-hidden {
+  grid-template-columns: 1fr;
 }
 
 /* Synchronized Video Monitor Card */
