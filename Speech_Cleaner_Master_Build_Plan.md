@@ -1589,3 +1589,27 @@ Then:
 10. confirm the output duration matches the input
 
 Only after this succeeds should the main Tauri interface be built.
+
+---
+
+# 49. Milestone 3: Professional Workstation Polish, Synchronised Video & Deep Zoom Engine
+
+## 49.1 High-Resolution Multi-Scale Audio Zoom Engine
+For media spanning from 30 seconds to over an hour:
+- An overview minimap timeline providing full file context and draggable viewport window.
+- Detail waveform view equipped with continuous zoom (`Ctrl + MouseWheel` / Zoom Slider / Zoom In/Out buttons) scaling from 1x (whole project) up to 50x (sub-100ms granularity).
+- Horizontal panning (`Shift + MouseWheel` or scrollbar) to navigate large timelines effortlessly.
+- Exact time ruler with adaptive tick intervals (hours, minutes, seconds, milliseconds).
+- Authentic peak-derived amplitude rendering extracted during audio inspection.
+
+## 49.2 Synchronised Expandable Video Preview Player
+- Collapsible/expandable video monitor dockable alongside or above the timeline.
+- Bi-directional scrubbing synchronization: moving the timeline playhead scrubs the video frame instantly, and playing the video moves the audio playhead.
+- Compact / Expanded toggle with native video aspect ratio preservation.
+
+## 49.3 Native Desktop Workstation Design Contract
+- Clean, crisp, solid workstation aesthetic inspired by professional NLEs (DaVinci Resolve, Premiere Pro, Audacity).
+- No glassmorphic blur filters, no fuzzy neon drop-shadows, no AI-gimmick styling.
+- High-contrast, utilitarian dark palette (`#111318`, `#161920`, `#1C2029`, `#262C38`), crisp 1px borders, compact padding, and professional `Inter` / `JetBrains Mono` typography.
+- Clear tactile feedback on hover, selection, and toggle states.
+- Author credit: SkdSam.

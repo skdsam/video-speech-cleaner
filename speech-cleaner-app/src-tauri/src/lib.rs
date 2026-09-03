@@ -124,6 +124,7 @@ pub struct AnalysisResult {
     pub metadata: MediaMetadata,
     pub fillers: Vec<FillerItem>,
     pub audio_preview_path: String,
+    pub peaks: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,10 +380,46 @@ fn analyze_audio(path: String) -> Result<AnalysisResult, String> {
         }
     }
 
+    // Extract real peak envelope from preview_wav (downsampled to ~2000 points for silky smooth rendering at all zoom levels)
+    let mut peaks: Vec<f32> = Vec::new();
+    if let Ok(mut reader) = hound::WavReader::open(&preview_wav) {
+        let spec = reader.spec();
+        let channels = spec.channels.max(1) as usize;
+        let total_samples = reader.len() as usize / channels;
+        let target_points = 2400;
+        let chunk_size = (total_samples / target_points).max(1);
+
+        let mut current_max: f32 = 0.0;
+        let mut sample_idx = 0;
+
+        for sample in reader.samples::<i16>() {
+            if let Ok(s) = sample {
+                let abs_val = (s as f32).abs() / 32768.0;
+                if abs_val > current_max {
+                    current_max = abs_val;
+                }
+                sample_idx += 1;
+                if sample_idx % (chunk_size * channels) == 0 {
+                    peaks.push((current_max * 1.25).min(1.0));
+                    current_max = 0.0;
+                }
+            }
+        }
+        if current_max > 0.0 && peaks.len() < target_points {
+            peaks.push((current_max * 1.25).min(1.0));
+        }
+    }
+
+    // Fallback if wav read was empty
+    if peaks.is_empty() {
+        peaks = vec![0.3; 200];
+    }
+
     Ok(AnalysisResult {
         metadata: meta,
         fillers,
         audio_preview_path: preview_wav.to_string_lossy().to_string(),
+        peaks,
     })
 }
 
