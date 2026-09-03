@@ -373,22 +373,42 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
 
 #[tauri::command]
 fn play_audio_snippet(path: String, start: f64, duration: f64) -> Result<(), String> {
-    // Kill any existing ffplay instance so multiple preview clicks don't overlap
+    // Kill any existing ffplay instance
     let _ = Command::new("taskkill")
         .args(["/F", "/IM", "ffplay.exe"])
         .output();
 
+    let cache_dir = PathBuf::from(r"D:\scratch\Remove words\cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let snippet_wav = cache_dir.join("preview_snippet.wav");
+
     let start_str = format!("{:.3}", start.max(0.0));
     let dur_str = format!("{:.3}", duration.max(0.1));
 
-    // Spawn ffplay in background without UI window
+    // Extract exact snippet using ffmpeg for sample-accurate playback
+    let ext = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-ss", &start_str,
+            "-t", &dur_str,
+            "-i", &path,
+            "-vn",
+            "-c:a", "pcm_s16le",
+            snippet_wav.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("FFmpeg snippet extract failed: {}", e))?;
+
+    if !ext.status.success() {
+        return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&ext.stderr)));
+    }
+
+    // Play extracted snippet using ffplay
     let mut cmd = Command::new("ffplay");
     cmd.args([
         "-nodisp",
         "-autoexit",
-        "-ss", &start_str,
-        "-t", &dur_str,
-        &path,
+        snippet_wav.to_str().unwrap(),
     ]);
 
     #[cfg(windows)]

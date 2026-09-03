@@ -252,16 +252,17 @@ selectConfidentBtn.addEventListener("click", () => {
   renderWaveform();
 });
 
-// Audio Preview with native ffplay snippet playback
+// Audio Preview: plays the exact region that will be muted
 async function previewRegion(start: number, end: number, btn?: HTMLButtonElement) {
   if (!currentMetadata) return;
 
-  // 1.5 second context before and after filler
-  const preRoll = 1.2;
-  const postRoll = 1.2;
-  const playStart = Math.max(0, start - preRoll);
-  const playEnd = Math.min(currentMetadata.duration, end + postRoll);
-  const playDuration = Math.max(0.5, playEnd - playStart);
+  // Read current user padding settings so the preview exactly matches what will be muted
+  const paddingMs = parseFloat((document.getElementById("paramPaddingBefore") as HTMLInputElement)?.value) || 30;
+  const padSec = paddingMs / 1000.0;
+
+  const playStart = Math.max(0, start - padSec);
+  const playEnd = Math.min(currentMetadata.duration, end + padSec);
+  const playDuration = Math.max(0.1, playEnd - playStart);
 
   if (btn) {
     const originalHtml = btn.innerHTML;
