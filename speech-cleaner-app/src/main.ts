@@ -150,8 +150,9 @@ let selectionEndTime: number | null = null;
 // Edge dragging on existing regions
 type ResizingEdge = { fillerId: string; edge: "start" | "end" } | null;
 let resizingRegion: ResizingEdge = null;
-// Edge dragging on current selection
-let resizingSelectionEdge: "start" | "end" | null = null;
+// Edge dragging on current selection ("start", "end", or "move" to slide whole span)
+let resizingSelectionEdge: "start" | "end" | "move" | null = null;
+let dragSelectionOffset: number = 0;
 
 // Tool & Selection DOM Elements
 const timelineHintText = document.getElementById("timelineHintText") as HTMLElement;
@@ -833,6 +834,39 @@ minimapContainer.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   if (isDraggingMinimap && currentMetadata) {
     handleMinimapClick(e);
+  } else if ((resizingRegion || resizingSelectionEdge) && currentMetadata) {
+    // Forward to waveform mousemove tracking logic so handle dragging is smooth everywhere
+    const t = getTimestampFromClientX(e.clientX);
+    if (resizingRegion) {
+      const filler = currentFillers.find((f) => f.id === resizingRegion!.fillerId);
+      if (filler) {
+        if (resizingRegion.edge === "start") {
+          filler.start = Math.max(0, Math.min(t, filler.end - 0.05));
+        } else {
+          filler.end = Math.min(currentMetadata.duration, Math.max(t, filler.start + 0.05));
+        }
+        timelineHoverTooltip.innerText = `${resizingRegion.edge.toUpperCase()}: ${formatTimecode(resizingRegion.edge === "start" ? filler.start : filler.end)}`;
+        renderWaveformTrack();
+        renderMinimap();
+        renderFillersList();
+        updateSummary();
+      }
+    } else if (resizingSelectionEdge) {
+      if (resizingSelectionEdge === "start") {
+        selectionStartTime = Math.max(0, Math.min(t, (selectionEndTime ?? t) - 0.04));
+      } else if (resizingSelectionEdge === "end") {
+        selectionEndTime = Math.min(currentMetadata.duration, Math.max(t, (selectionStartTime ?? t) + 0.04));
+      } else if (resizingSelectionEdge === "move") {
+        const dur = Math.abs((selectionEndTime ?? 0) - (selectionStartTime ?? 0));
+        const newStart = Math.max(0, Math.min(currentMetadata.duration - dur, t - dragSelectionOffset));
+        selectionStartTime = newStart;
+        selectionEndTime = newStart + dur;
+      }
+      updateSelectionUI();
+      const s = Math.min(selectionStartTime!, selectionEndTime!);
+      const endT = Math.max(selectionStartTime!, selectionEndTime!);
+      timelineHoverTooltip.innerText = `SPAN: ${formatTimecode(s)} → ${formatTimecode(endT)} (${(endT - s).toFixed(2)}s)`;
+    }
   }
 });
 
@@ -961,34 +995,55 @@ waveformContainer.addEventListener("mousemove", (e) => {
     return;
   }
 
-  // 2. If currently dragging selection handle
+  // 2. If currently dragging selection handle or moving whole selection
   if (resizingSelectionEdge) {
     if (resizingSelectionEdge === "start") {
       selectionStartTime = Math.max(0, Math.min(t, (selectionEndTime ?? t) - 0.04));
-    } else {
+    } else if (resizingSelectionEdge === "end") {
       selectionEndTime = Math.min(currentMetadata.duration, Math.max(t, (selectionStartTime ?? t) + 0.04));
+    } else if (resizingSelectionEdge === "move") {
+      const dur = Math.abs((selectionEndTime ?? 0) - (selectionStartTime ?? 0));
+      const newStart = Math.max(0, Math.min(currentMetadata.duration - dur, t - dragSelectionOffset));
+      selectionStartTime = newStart;
+      selectionEndTime = newStart + dur;
     }
     updateSelectionUI();
-    timelineHoverTooltip.innerText = `NUDGE: ${formatTimecode(resizingSelectionEdge === "start" ? selectionStartTime! : selectionEndTime!)}`;
+    const s = Math.min(selectionStartTime!, selectionEndTime!);
+    const e = Math.max(selectionStartTime!, selectionEndTime!);
+    timelineHoverTooltip.innerText = `SPAN: ${formatTimecode(s)} → ${formatTimecode(e)} (${(e - s).toFixed(2)}s)`;
     return;
   }
 
   // 3. If in custom mute mode
   if (isCustomMuteMode) {
     if (customMuteStep === "awaiting_start") {
-      timelineHoverTooltip.innerText = `CLICK START: ${formatTimecode(t)}`;
+      timelineHoverTooltip.innerText = `CLICK OR DRAG START: ${formatTimecode(t)}`;
       waveformContainer.style.cursor = "crosshair";
     } else if (customMuteStep === "awaiting_end" && selectionStartTime !== null) {
       selectionEndTime = t;
       updateSelectionUI();
       const s = Math.min(selectionStartTime, selectionEndTime);
       const endT = Math.max(selectionStartTime, selectionEndTime);
-      timelineHoverTooltip.innerText = `CLICK END: ${formatTimecode(t)} (Span: ${(endT - s).toFixed(2)}s)`;
+      timelineHoverTooltip.innerText = `RELEASE OR CLICK END: ${formatTimecode(t)} (${(endT - s).toFixed(2)}s)`;
       waveformContainer.style.cursor = "crosshair";
       return;
     } else if (customMuteStep === "selected") {
       timelineHoverTooltip.innerText = formatTimecode(t);
-      waveformContainer.style.cursor = "default";
+      // Check if mouse is near start or end edge of selection
+      if (selectionStartTime !== null && selectionEndTime !== null) {
+        const s = Math.min(selectionStartTime, selectionEndTime);
+        const endT = Math.max(selectionStartTime, selectionEndTime);
+        const toleranceSec = (12 / totalTrackW) * currentMetadata.duration;
+        if (Math.abs(t - s) <= toleranceSec || Math.abs(t - endT) <= toleranceSec) {
+          waveformContainer.style.cursor = "ew-resize";
+        } else if (t >= s && t <= endT) {
+          waveformContainer.style.cursor = "grab";
+        } else {
+          waveformContainer.style.cursor = "default";
+        }
+      } else {
+        waveformContainer.style.cursor = "default";
+      }
     }
   } else {
     timelineHoverTooltip.innerText = formatTimecode(t);
@@ -1017,23 +1072,23 @@ waveformContainer.addEventListener("mousedown", (e) => {
   const rect = waveformContainer.getBoundingClientRect();
   const totalTrackW = waveformCanvas.width || rect.width;
 
-  // If user is dragging selection handles, let handle listeners deal with it
+  // If user is already dragging selection handles, let it proceed
   if (resizingSelectionEdge) return;
 
-  // If in custom mute mode: 2-click process
+  // If in custom mute mode:
   if (isCustomMuteMode) {
-    if (e.button !== 0) return; // Left click only for custom mute selection
+    if (e.button !== 0) return; // Left click only
     e.preventDefault();
 
     if (customMuteStep === "awaiting_start") {
-      // First click: Set Start
+      // Start of selection (works for both click-and-drag and 2-click)
       selectionStartTime = clickTime;
       selectionEndTime = clickTime;
       customMuteStep = "awaiting_end";
-      timelineHintText.innerText = "Now move your cursor and click the END position on the audio timeline";
+      timelineHintText.innerText = "Drag to end point and release, or click again at the end point";
       updateSelectionUI();
     } else if (customMuteStep === "awaiting_end") {
-      // Second click: Set End & lock in range
+      // 2nd click: finalize end of selection
       selectionEndTime = clickTime;
       const s = Math.min(selectionStartTime!, selectionEndTime);
       const endT = Math.max(selectionStartTime!, selectionEndTime);
@@ -1044,8 +1099,34 @@ waveformContainer.addEventListener("mousedown", (e) => {
       timelineHintText.innerText = "Area selected! Drag handles to adjust, then click 'Apply Mute' (or press Enter)";
       updateSelectionUI();
     } else if (customMuteStep === "selected") {
-      // If user clicks outside the selection while already selected, seek or let them adjust
-      seekTo(clickTime);
+      if (selectionStartTime !== null && selectionEndTime !== null) {
+        const s = Math.min(selectionStartTime, selectionEndTime);
+        const endT = Math.max(selectionStartTime, selectionEndTime);
+        const toleranceSec = (12 / totalTrackW) * currentMetadata.duration;
+
+        // Check if user clicked near start handle
+        if (Math.abs(clickTime - s) <= toleranceSec) {
+          resizingSelectionEdge = "start";
+          return;
+        }
+        // Check if user clicked near end handle
+        if (Math.abs(clickTime - endT) <= toleranceSec) {
+          resizingSelectionEdge = "end";
+          return;
+        }
+        // Check if user clicked inside the selection box to slide it
+        if (clickTime > s && clickTime < endT) {
+          resizingSelectionEdge = "move";
+          dragSelectionOffset = clickTime - s;
+          return;
+        }
+      }
+      // Clicked far outside: start a fresh custom selection
+      selectionStartTime = clickTime;
+      selectionEndTime = clickTime;
+      customMuteStep = "awaiting_end";
+      timelineHintText.innerText = "Drag to end point and release, or click again at the end point";
+      updateSelectionUI();
     }
     return;
   }
@@ -1090,6 +1171,25 @@ window.addEventListener("mouseup", () => {
 
   if (resizingSelectionEdge) {
     resizingSelectionEdge = null;
+    waveformContainer.style.cursor = "default";
+  }
+
+  // If in custom mute mode and awaiting end, check if the user did a click-and-drag
+  if (isCustomMuteMode && customMuteStep === "awaiting_end") {
+    if (selectionStartTime !== null && selectionEndTime !== null) {
+      const s = Math.min(selectionStartTime, selectionEndTime);
+      const endT = Math.max(selectionStartTime, selectionEndTime);
+      const dur = endT - s;
+      // If user dragged more than 0.05s, finalize into "selected" state on mouse release!
+      if (dur >= 0.05) {
+        selectionStartTime = s;
+        selectionEndTime = endT;
+        customMuteStep = "selected";
+        waveformContainer.style.cursor = "default";
+        timelineHintText.innerText = "Area selected! Drag handles to adjust, then click 'Apply Mute' (or press Enter)";
+        updateSelectionUI();
+      }
+    }
   }
 
   if (isDraggingTimeline) {
@@ -1229,12 +1329,26 @@ function commitSelectionAsMute() {
 // Dragging selection left/right handles
 selectionHandleLeft.addEventListener("mousedown", (e) => {
   e.stopPropagation();
+  e.preventDefault();
   resizingSelectionEdge = "start";
 });
 
 selectionHandleRight.addEventListener("mousedown", (e) => {
   e.stopPropagation();
+  e.preventDefault();
   resizingSelectionEdge = "end";
+});
+
+// Dragging the whole selection area body
+timelineSelection.addEventListener("mousedown", (e) => {
+  if (e.target === selectionHandleLeft || e.target === selectionHandleRight) return;
+  if (!currentMetadata || selectionStartTime === null || selectionEndTime === null) return;
+  e.stopPropagation();
+  e.preventDefault();
+  const clickTime = getTimestampFromClientX(e.clientX);
+  const s = Math.min(selectionStartTime, selectionEndTime);
+  resizingSelectionEdge = "move";
+  dragSelectionOffset = clickTime - s;
 });
 
 // Toggle Custom Mute Mode via Button

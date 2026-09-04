@@ -756,21 +756,26 @@ body {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: rgba(139, 92, 246, 0.25);
+  background: rgba(139, 92, 246, 0.28);
   border-left: 2px solid var(--accent-purple);
   border-right: 2px solid var(--accent-purple);
-  z-index: 8;
-  pointer-events: none;
+  z-index: 12;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.timeline-selection:active {
+  cursor: grabbing;
 }
 
 .selection-handle {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 14px;
+  width: 20px;
   cursor: ew-resize;
   pointer-events: auto;
-  z-index: 12;
+  z-index: 15;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -779,25 +784,25 @@ body {
 .selection-handle::after {
   content: "";
   display: block;
-  width: 4px;
-  height: 36px;
+  width: 5px;
+  height: 48px;
   background: #C4B5FD;
-  border-radius: 2px;
-  box-shadow: 0 0 6px rgba(139, 92, 246, 0.8);
+  border-radius: 3px;
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.9);
   transition: transform 0.15s ease, background 0.15s ease;
 }
 
 .selection-handle:hover::after {
   background: #FFFFFF;
-  transform: scaleY(1.2);
+  transform: scaleY(1.15) scaleX(1.2);
 }
 
 .selection-handle.handle-left {
-  left: -7px;
+  left: -10px;
 }
 
 .selection-handle.handle-right {
-  right: -7px;
+  right: -10px;
 }
 
 /* Floating Selection Action Bar */
