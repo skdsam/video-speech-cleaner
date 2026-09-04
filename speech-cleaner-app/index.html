@@ -173,7 +173,25 @@
         <div class="track-toolbar">
           <div class="track-toolbar-left">
             <span class="track-title">Audio Track 1</span>
-            <span class="timeline-hint">Ctrl + Scroll to Zoom • Shift + Scroll to Pan • Alt + Drag to Add Mute</span>
+            <div class="mode-toggles">
+              <button id="modeScrubBtn" class="btn btn-secondary btn-xs active-mode" title="Scrub & Seek Mode (V)">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Scrub (V)
+              </button>
+              <button id="modeSelectBtn" class="btn btn-secondary btn-xs" title="Drag to Select Range Mode (R)">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/>
+                </svg>
+                Select Range (R)
+              </button>
+            </div>
+            <div class="inout-quick-btns">
+              <button id="quickMarkInBtn" class="btn btn-secondary btn-xs" title="Set In-point at Playhead (Press 'I')">Mark In [I]</button>
+              <button id="quickMarkOutBtn" class="btn btn-secondary btn-xs" title="Set Out-point at Playhead (Press 'O')">Mark Out [O]</button>
+            </div>
+            <span class="timeline-hint">Scroll to Zoom • Drag edges to resize • [I]/[O] to mark range</span>
           </div>
 
           <div class="zoom-controls">
@@ -207,8 +225,26 @@
           <div class="waveform-canvas-container" id="waveformContainer">
             <canvas id="waveformCanvas"></canvas>
             <div id="playheadLine" class="playhead-line" style="display: none;"></div>
-            <div id="timelineSelection" class="timeline-selection" style="display: none;"></div>
+            <div id="timelineSelection" class="timeline-selection" style="display: none;">
+              <div class="selection-handle handle-left" id="selectionHandleLeft"></div>
+              <div class="selection-handle handle-right" id="selectionHandleRight"></div>
+            </div>
             <div id="timelineHoverTooltip" class="timeline-tooltip" style="display: none;">00:00:00.00</div>
+
+            <!-- Floating Selection Action Bar -->
+            <div id="selectionActionBar" class="selection-action-bar" style="display: none;">
+              <span id="selectionDurationText" class="selection-dur-badge">0.00s</span>
+              <button id="selPreviewBtn" class="btn btn-xs btn-primary" title="Preview selected audio clip (Space)">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Preview
+              </button>
+              <button id="selAddMuteBtn" class="btn btn-xs btn-danger" title="Create mute region from selection (Enter or M)">
+                + Add Mute
+              </button>
+              <button id="selCancelBtn" class="btn btn-xs btn-secondary" title="Clear selection (Esc)">✕</button>
+            </div>
           </div>
         </div>
 

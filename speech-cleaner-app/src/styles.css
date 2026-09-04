@@ -737,16 +737,72 @@ body {
   border-top: 6px solid var(--accent-cyan);
 }
 
-/* Timeline Selection Drag */
+/* Mode Toggles and In/Out Quick Buttons */
+.mode-toggles, .inout-quick-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mode-toggles .btn.active-mode {
+  background: var(--accent-blue) !important;
+  color: #FFF !important;
+  border-color: var(--accent-blue) !important;
+}
+
+/* Timeline Selection Drag & Handles */
 .timeline-selection {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: rgba(225, 29, 72, 0.25);
-  border-left: 1px solid var(--accent-red);
-  border-right: 1px solid var(--accent-red);
-  pointer-events: none;
+  background: rgba(139, 92, 246, 0.22);
+  border-left: 2px solid var(--accent-purple);
+  border-right: 2px solid var(--accent-purple);
   z-index: 8;
+  pointer-events: none;
+}
+
+.selection-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  z-index: 9;
+}
+
+.selection-handle.handle-left {
+  left: -4px;
+}
+
+.selection-handle.handle-right {
+  right: -4px;
+}
+
+/* Floating Selection Action Bar */
+.selection-action-bar {
+  position: absolute;
+  top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(15, 18, 26, 0.94);
+  border: 1px solid var(--border-color);
+  padding: 3px 8px;
+  border-radius: var(--radius-xs);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+  z-index: 20;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+.selection-dur-badge {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent-purple);
+  margin-right: 2px;
 }
 
 /* Timeline Tooltip */

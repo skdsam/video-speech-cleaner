@@ -594,19 +594,20 @@ zoomFitBtn.addEventListener("click", () => {
   waveformViewport.scrollLeft = 0;
 });
 
-// Ctrl + MouseWheel to zoom; Shift + MouseWheel to horizontal pan
+// MouseWheel / Ctrl+MouseWheel to zoom; Shift+MouseWheel to horizontal pan
 waveformViewport.addEventListener(
   "wheel",
   (e) => {
-    if (e.ctrlKey) {
-      e.preventDefault();
+    e.preventDefault();
+    if (e.shiftKey) {
+      // Shift + Wheel = horizontal pan
+      waveformViewport.scrollLeft += e.deltaY;
+    } else {
+      // Direct wheel or Ctrl + wheel = zoom centered at mouse position
       const rect = waveformViewport.getBoundingClientRect();
-      const mouseRatio = (e.clientX - rect.left) / rect.width;
+      const mouseRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const zoomFactor = e.deltaY < 0 ? 1.25 : 0.8;
       setZoom(zoomLevel * zoomFactor, mouseRatio);
-    } else if (e.shiftKey) {
-      e.preventDefault();
-      waveformViewport.scrollLeft += e.deltaY;
     }
   },
   { passive: false }
