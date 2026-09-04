@@ -139,11 +139,34 @@ let zoomLevel = 1.0; // 1.0 = fit to viewport; up to 50.0x for deep zoom
 let isPlaying = false;
 let currentTime = 0;
 let animationFrameId: number | null = null;
-let isDraggingTimeline = false;
+// Selection & Tool Mode State
+let currentToolMode: "scrub" | "select" = "scrub";
 let isSelectingWaveform = false;
+let isDraggingTimeline = false;
 let isDraggingMinimap = false;
 let selectionStartX = 0;
 let selectionCurrentX = 0;
+let selectionStartTime: number | null = null;
+let selectionEndTime: number | null = null;
+
+// Edge dragging on existing regions
+type ResizingEdge = { fillerId: string; edge: "start" | "end" } | null;
+let resizingRegion: ResizingEdge = null;
+// Edge dragging on current selection
+let resizingSelectionEdge: "start" | "end" | null = null;
+
+// Tool & Selection DOM Elements
+const modeScrubBtn = document.getElementById("modeScrubBtn") as HTMLButtonElement;
+const modeSelectBtn = document.getElementById("modeSelectBtn") as HTMLButtonElement;
+const quickMarkInBtn = document.getElementById("quickMarkInBtn") as HTMLButtonElement;
+const quickMarkOutBtn = document.getElementById("quickMarkOutBtn") as HTMLButtonElement;
+const selectionActionBar = document.getElementById("selectionActionBar") as HTMLElement;
+const selectionDurationText = document.getElementById("selectionDurationText") as HTMLElement;
+const selPreviewBtn = document.getElementById("selPreviewBtn") as HTMLButtonElement;
+const selAddMuteBtn = document.getElementById("selAddMuteBtn") as HTMLButtonElement;
+const selCancelBtn = document.getElementById("selCancelBtn") as HTMLButtonElement;
+const selectionHandleLeft = document.getElementById("selectionHandleLeft") as HTMLElement;
+const selectionHandleRight = document.getElementById("selectionHandleRight") as HTMLElement;
 
 // -------------------------------------------------------------
 // File Pick & Loading
@@ -542,12 +565,39 @@ timelineScrubber.addEventListener("input", () => {
   seekTo(target);
 });
 
-// Spacebar Play/Pause Shortcut
+// Global Keyboard Shortcuts (Space: Play/Pause, I: Mark In, O: Mark Out, R: Select Mode, V: Scrub Mode, Enter/M: Add Mute, Esc: Clear Selection)
 window.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && (e.target === document.body || e.target === waveformViewport)) {
+  const activeEl = document.activeElement as HTMLElement | null;
+  const isInputActive = activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA");
+
+  if (e.code === "Space" && !isInputActive) {
     e.preventDefault();
-    if (isPlaying) pauseAudio();
-    else playAudio();
+    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.05) {
+      // If a range is selected, Space plays the selection preview
+      previewRegion(Math.min(selectionStartTime, selectionEndTime), Math.max(selectionStartTime, selectionEndTime));
+    } else {
+      if (isPlaying) pauseAudio();
+      else playAudio();
+    }
+  } else if ((e.key === "i" || e.key === "I") && !isInputActive) {
+    e.preventDefault();
+    setInPointAtPlayhead();
+  } else if ((e.key === "o" || e.key === "O") && !isInputActive) {
+    e.preventDefault();
+    setOutPointAtPlayhead();
+  } else if ((e.key === "r" || e.key === "R") && !isInputActive) {
+    e.preventDefault();
+    setToolMode("select");
+  } else if ((e.key === "v" || e.key === "V") && !isInputActive) {
+    e.preventDefault();
+    setToolMode("scrub");
+  } else if ((e.key === "m" || e.key === "M" || e.key === "Enter") && !isInputActive) {
+    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.05) {
+      e.preventDefault();
+      commitSelectionAsMute();
+    }
+  } else if (e.key === "Escape") {
+    clearSelectionRange();
   }
 });
 
@@ -686,6 +736,11 @@ function renderWaveformTrack() {
       ctx.strokeStyle = isCustom ? "#8B5CF6" : "#E11D48";
       ctx.lineWidth = 1;
       ctx.strokeRect(startX, 0, zoneW, trackHeight);
+
+      // Draw subtle draggable edge grip handles on left and right borders
+      ctx.fillStyle = isCustom ? "#C4B5FD" : "#FDA4AF";
+      ctx.fillRect(startX, 0, 3, trackHeight);
+      ctx.fillRect(startX + zoneW - 3, 0, 3, trackHeight);
 
       // Label badge — clipped to zone width so it never overflows into adjacent words
       ctx.save();
@@ -875,23 +930,84 @@ function getTimestampFromClientX(clientX: number): number {
   return ratio * currentMetadata.duration;
 }
 
+// Helper: find if mouse is near the left or right edge of an existing mute region
+function findRegionEdgeNearX(clickTime: number, totalTrackW: number, tolerancePx: number = 8): { filler: FillerItem; edge: "start" | "end" } | null {
+  if (!currentMetadata) return null;
+  const duration = currentMetadata.duration;
+  const toleranceSec = (tolerancePx / totalTrackW) * duration;
+
+  for (const f of currentFillers) {
+    if (!f.enabled) continue;
+    if (Math.abs(clickTime - f.start) <= toleranceSec) {
+      return { filler: f, edge: "start" };
+    }
+    if (Math.abs(clickTime - f.end) <= toleranceSec) {
+      return { filler: f, edge: "end" };
+    }
+  }
+  return null;
+}
+
 waveformContainer.addEventListener("mousemove", (e) => {
   if (!currentMetadata) return;
   const t = getTimestampFromClientX(e.clientX);
   const rect = waveformContainer.getBoundingClientRect();
   const relX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+  const totalTrackW = waveformCanvas.width || rect.width;
 
   timelineHoverTooltip.style.display = "block";
   timelineHoverTooltip.style.left = `${relX}px`;
   timelineHoverTooltip.innerText = formatTimecode(t);
 
+  // If currently dragging an existing region edge
+  if (resizingRegion) {
+    const filler = currentFillers.find((f) => f.id === resizingRegion!.fillerId);
+    if (filler) {
+      if (resizingRegion.edge === "start") {
+        filler.start = Math.max(0, Math.min(t, filler.end - 0.05));
+      } else {
+        filler.end = Math.min(currentMetadata.duration, Math.max(t, filler.start + 0.05));
+      }
+      timelineHoverTooltip.innerText = `${resizingRegion.edge.toUpperCase()}: ${formatTimecode(resizingRegion.edge === "start" ? filler.start : filler.end)}`;
+      renderWaveformTrack();
+      renderMinimap();
+      renderFillersList();
+      updateSummary();
+    }
+    return;
+  }
+
+  // If currently dragging selection handle
+  if (resizingSelectionEdge) {
+    if (resizingSelectionEdge === "start") {
+      selectionStartTime = Math.min(t, (selectionEndTime ?? t) - 0.05);
+    } else {
+      selectionEndTime = Math.max(t, (selectionStartTime ?? t) + 0.05);
+    }
+    updateSelectionUI();
+    return;
+  }
+
+  // Check cursor style for region edges when hovering
+  if (!isSelectingWaveform && !isDraggingTimeline) {
+    const nearEdge = findRegionEdgeNearX(t, totalTrackW);
+    if (nearEdge) {
+      waveformContainer.style.cursor = "ew-resize";
+    } else if (currentToolMode === "select" || e.altKey) {
+      waveformContainer.style.cursor = "crosshair";
+    } else {
+      waveformContainer.style.cursor = "default";
+    }
+  }
+
+  // Handling range drag selection
   if (isSelectingWaveform) {
     selectionCurrentX = relX;
-    const minX = Math.min(selectionStartX, selectionCurrentX);
-    const maxX = Math.max(selectionStartX, selectionCurrentX);
-    timelineSelection.style.display = "block";
-    timelineSelection.style.left = `${minX}px`;
-    timelineSelection.style.width = `${maxX - minX}px`;
+    const startX = selectionStartX;
+    const endX = selectionCurrentX;
+    selectionStartTime = (Math.min(startX, endX) / totalTrackW) * currentMetadata.duration;
+    selectionEndTime = (Math.max(startX, endX) / totalTrackW) * currentMetadata.duration;
+    updateSelectionUI();
   } else if (isDraggingTimeline) {
     seekTo(t);
   }
@@ -899,9 +1015,6 @@ waveformContainer.addEventListener("mousemove", (e) => {
 
 waveformContainer.addEventListener("mouseleave", () => {
   timelineHoverTooltip.style.display = "none";
-  if (!isSelectingWaveform) {
-    timelineSelection.style.display = "none";
-  }
 });
 
 waveformContainer.addEventListener("mousedown", (e) => {
@@ -909,10 +1022,17 @@ waveformContainer.addEventListener("mousedown", (e) => {
   const clickTime = getTimestampFromClientX(e.clientX);
   const rect = waveformContainer.getBoundingClientRect();
   const relX = e.clientX - rect.left;
+  const totalTrackW = waveformCanvas.width || rect.width;
 
-  // Check if clicked inside an existing filler region
+  // 1. First priority: check if user clicked on an edge handle of an existing mute region
+  const edgeHit = findRegionEdgeNearX(clickTime, totalTrackW);
+  if (edgeHit && e.button === 0) {
+    resizingRegion = { fillerId: edgeHit.filler.id, edge: edgeHit.edge };
+    return;
+  }
+
+  // 2. Check if clicked on a filler body to toggle/delete
   const hitIndex = currentFillers.findIndex((f) => clickTime >= f.start && clickTime <= f.end);
-
   if (e.button === 2 || e.shiftKey) {
     if (hitIndex !== -1) {
       currentFillers.splice(hitIndex, 1);
@@ -923,7 +1043,8 @@ waveformContainer.addEventListener("mousedown", (e) => {
     }
   }
 
-  if (hitIndex !== -1) {
+  // In scrub mode, clicking inside a filler zone toggles its enabled status
+  if (hitIndex !== -1 && currentToolMode === "scrub" && !e.altKey) {
     currentFillers[hitIndex].enabled = !currentFillers[hitIndex].enabled;
     renderFillersList();
     updateSummary();
@@ -931,39 +1052,193 @@ waveformContainer.addEventListener("mousedown", (e) => {
     return;
   }
 
-  if (e.altKey) {
+  // 3. Selection mode OR Alt-drag initiates range selection
+  if (currentToolMode === "select" || e.altKey) {
     isSelectingWaveform = true;
     selectionStartX = relX;
     selectionCurrentX = relX;
+    selectionStartTime = clickTime;
+    selectionEndTime = clickTime;
+    updateSelectionUI();
   } else {
+    // Normal scrub / playhead repositioning
     isDraggingTimeline = true;
     seekTo(clickTime);
   }
 });
 
 window.addEventListener("mouseup", () => {
+  if (resizingRegion) {
+    resizingRegion = null;
+    waveformContainer.style.cursor = "default";
+  }
+
+  if (resizingSelectionEdge) {
+    resizingSelectionEdge = null;
+  }
+
   if (isDraggingTimeline) {
     isDraggingTimeline = false;
   }
 
   if (isSelectingWaveform) {
     isSelectingWaveform = false;
-    timelineSelection.style.display = "none";
-
-    const totalTrackW = waveformCanvas.width;
-    const minX = Math.min(selectionStartX, selectionCurrentX);
-    const maxX = Math.max(selectionStartX, selectionCurrentX);
-
-    if (currentMetadata && maxX - minX > 5) {
-      const startTime = (minX / totalTrackW) * currentMetadata.duration;
-      const endTime = (maxX / totalTrackW) * currentMetadata.duration;
-
-      manualAddPanel.style.display = "block";
-      manualStartInput.value = startTime.toFixed(3);
-      manualEndInput.value = endTime.toFixed(3);
-      manualWordInput.focus();
+    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.04) {
+      // Keep selection visible and show floating action bar
+      showSelectionActionBar();
+    } else {
+      clearSelectionRange();
     }
   }
+});
+
+// Update selection overlay and handles
+function updateSelectionUI() {
+  if (!currentMetadata || selectionStartTime === null || selectionEndTime === null) {
+    timelineSelection.style.display = "none";
+    selectionActionBar.style.display = "none";
+    return;
+  }
+
+  const duration = currentMetadata.duration;
+  const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
+  const s = Math.max(0, Math.min(selectionStartTime, selectionEndTime));
+  const e = Math.min(duration, Math.max(selectionStartTime, selectionEndTime));
+
+  const leftPx = (s / duration) * totalTrackW;
+  const rightPx = (e / duration) * totalTrackW;
+  const widthPx = Math.max(2, rightPx - leftPx);
+
+  timelineSelection.style.display = "block";
+  timelineSelection.style.left = `${leftPx}px`;
+  timelineSelection.style.width = `${widthPx}px`;
+
+  showSelectionActionBar();
+}
+
+function showSelectionActionBar() {
+  if (!currentMetadata || selectionStartTime === null || selectionEndTime === null) return;
+  const duration = currentMetadata.duration;
+  const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
+  const s = Math.max(0, Math.min(selectionStartTime, selectionEndTime));
+  const e = Math.min(duration, Math.max(selectionStartTime, selectionEndTime));
+  const selDur = e - s;
+
+  if (selDur <= 0.03) {
+    selectionActionBar.style.display = "none";
+    return;
+  }
+
+  const leftPx = (s / duration) * totalTrackW;
+  const rightPx = (e / duration) * totalTrackW;
+  const midX = (leftPx + rightPx) / 2;
+
+  selectionDurationText.innerText = `${formatTimecode(s)} → ${formatTimecode(e)} (${selDur.toFixed(2)}s)`;
+  selectionActionBar.style.display = "flex";
+  // Center action bar over selection (clamped within track)
+  const barW = 260;
+  const clampedX = Math.max(10, Math.min(totalTrackW - barW - 10, midX - barW / 2));
+  selectionActionBar.style.left = `${clampedX}px`;
+}
+
+function clearSelectionRange() {
+  selectionStartTime = null;
+  selectionEndTime = null;
+  timelineSelection.style.display = "none";
+  selectionActionBar.style.display = "none";
+}
+
+// In / Out point setting
+function setInPointAtPlayhead() {
+  if (!currentMetadata) return;
+  selectionStartTime = currentTime;
+  if (selectionEndTime === null || selectionEndTime <= selectionStartTime) {
+    selectionEndTime = Math.min(currentMetadata.duration, currentTime + 0.5);
+  }
+  updateSelectionUI();
+}
+
+function setOutPointAtPlayhead() {
+  if (!currentMetadata) return;
+  selectionEndTime = currentTime;
+  if (selectionStartTime === null || selectionStartTime >= selectionEndTime) {
+    selectionStartTime = Math.max(0, currentTime - 0.5);
+  }
+  updateSelectionUI();
+}
+
+// Tool Mode Switcher
+function setToolMode(mode: "scrub" | "select") {
+  currentToolMode = mode;
+  if (mode === "scrub") {
+    modeScrubBtn.classList.add("active-mode");
+    modeSelectBtn.classList.remove("active-mode");
+    waveformContainer.style.cursor = "default";
+  } else {
+    modeSelectBtn.classList.add("active-mode");
+    modeScrubBtn.classList.remove("active-mode");
+    waveformContainer.style.cursor = "crosshair";
+  }
+}
+
+modeScrubBtn.addEventListener("click", () => setToolMode("scrub"));
+modeSelectBtn.addEventListener("click", () => setToolMode("select"));
+quickMarkInBtn.addEventListener("click", () => setInPointAtPlayhead());
+quickMarkOutBtn.addEventListener("click", () => setOutPointAtPlayhead());
+
+// Floating Action Bar Buttons
+selPreviewBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (selectionStartTime !== null && selectionEndTime !== null) {
+    const s = Math.min(selectionStartTime, selectionEndTime);
+    const end = Math.max(selectionStartTime, selectionEndTime);
+    previewRegion(s, end);
+  }
+});
+
+selAddMuteBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  commitSelectionAsMute();
+});
+
+selCancelBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  clearSelectionRange();
+});
+
+function commitSelectionAsMute() {
+  if (!currentMetadata || selectionStartTime === null || selectionEndTime === null) return;
+  const s = Math.min(selectionStartTime, selectionEndTime);
+  const e = Math.max(selectionStartTime, selectionEndTime);
+  if (e - s < 0.04) return;
+
+  const newItem: FillerItem = {
+    id: `custom_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    word: "custom",
+    start: s,
+    end: e,
+    confidence: 1.0,
+    enabled: true,
+  };
+
+  currentFillers.push(newItem);
+  currentFillers.sort((a, b) => a.start - b.start);
+
+  clearSelectionRange();
+  renderFillersList();
+  updateSummary();
+  renderAllViews();
+}
+
+// Dragging selection left/right handles
+selectionHandleLeft.addEventListener("mousedown", (e) => {
+  e.stopPropagation();
+  resizingSelectionEdge = "start";
+});
+
+selectionHandleRight.addEventListener("mousedown", (e) => {
+  e.stopPropagation();
+  resizingSelectionEdge = "end";
 });
 
 waveformContainer.addEventListener("contextmenu", (e) => e.preventDefault());
