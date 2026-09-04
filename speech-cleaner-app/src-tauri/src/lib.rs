@@ -1,67 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fs::File;
-use std::io::BufReader;
-use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
-use rodio::{Decoder, OutputStream, Sink, Source};
 
-enum AudioCommand {
-    Play {
-        path: PathBuf,
-        start: Duration,
-        duration: Option<Duration>,
-    },
-    Stop,
-}
 
-static AUDIO_SENDER: Mutex<Option<Sender<AudioCommand>>> = Mutex::new(None);
-
-fn ensure_audio_thread() -> Sender<AudioCommand> {
-    let mut lock = AUDIO_SENDER.lock().unwrap();
-    if let Some(ref tx) = *lock {
-        return tx.clone();
-    }
-
-    let (tx, rx) = channel::<AudioCommand>();
-    std::thread::spawn(move || {
-        let Ok((_stream, stream_handle)) = OutputStream::try_default() else {
-            return;
-        };
-        let Ok(sink) = Sink::try_new(&stream_handle) else {
-            return;
-        };
-
-        while let Ok(cmd) = rx.recv() {
-            sink.stop();
-            match cmd {
-                AudioCommand::Play { path, start, duration } => {
-                    if let Ok(file) = File::open(&path) {
-                        let reader = BufReader::new(file);
-                        if let Ok(source) = Decoder::new(reader) {
-                            if let Some(dur) = duration {
-                                let sliced = source.skip_duration(start).take_duration(dur);
-                                sink.append(sliced);
-                            } else {
-                                let sliced = source.skip_duration(start);
-                                sink.append(sliced);
-                            }
-                            sink.play();
-                        }
-                    }
-                }
-                AudioCommand::Stop => {
-                    sink.stop();
-                }
-            }
-        }
-    });
-
-    *lock = Some(tx.clone());
-    tx
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMetadata {
@@ -135,6 +77,92 @@ pub struct ExportRequest {
     pub padding_ms: f64,
     pub fade_ms: f64,
 }
+// ---------------------------------------------------------------------------
+// Silence detection from peaks — used to correct Whisper token timestamps
+// ---------------------------------------------------------------------------
+
+/// Detect silence periods from the peaks amplitude array.
+/// `min_silence_sec` = shortest gap that counts as silence (seconds).
+/// Returns a list of (start_sec, end_sec) pairs.
+fn find_silence_from_peaks(peaks: &[f32], duration: f64, min_silence_sec: f64) -> Vec<(f64, f64)> {
+    if peaks.is_empty() || duration <= 0.0 {
+        return Vec::new();
+    }
+    let n = peaks.len() as f64;
+    let peak_max = peaks.iter().cloned().fold(0.0_f32, f32::max);
+    // 6% of max or a hard floor of 0.5% — catches genuine pauses without
+    // triggering on inter-phoneme micro-gaps.
+    let threshold = (peak_max * 0.06).max(0.005);
+    let min_pts = ((min_silence_sec * n / duration) as usize).max(1);
+
+    let mut periods: Vec<(f64, f64)> = Vec::new();
+    let mut sil_start: Option<usize> = None;
+
+    for (i, &pk) in peaks.iter().enumerate() {
+        if pk < threshold {
+            if sil_start.is_none() {
+                sil_start = Some(i);
+            }
+        } else if let Some(start_i) = sil_start.take() {
+            if i - start_i >= min_pts {
+                periods.push((
+                    (start_i as f64 / n) * duration,
+                    (i      as f64 / n) * duration,
+                ));
+            }
+        }
+    }
+    // Trailing silence
+    if let Some(start_i) = sil_start {
+        if peaks.len() - start_i >= min_pts {
+            periods.push(((start_i as f64 / n) * duration, duration));
+        }
+    }
+    periods
+}
+
+/// Given a Whisper token (start, end), correct to the actual speech boundary.
+///
+/// Pattern: Whisper places the token *inside* the silence that follows the word.
+/// So: find the silence containing ws → speech resumes at se → find next silence
+/// start → that is the actual word end.
+fn snap_filler_timestamps(
+    ws: f64,
+    we: f64,
+    silence_periods: &[(f64, f64)],
+    duration: f64,
+) -> (f64, f64) {
+    // Phase 1 — does ws fall inside a silence period?
+    for &(ss, se) in silence_periods {
+        if ws >= ss && ws < se {
+            // Actual speech begins when this silence ends
+            let actual_start = se;
+
+            // Find the next silence start after actual_start — that is the word end
+            let mut actual_end = (actual_start + 0.6).min(duration);
+            for &(ns, _) in silence_periods {
+                if ns > actual_start && ns < actual_end {
+                    actual_end = ns;
+                }
+            }
+
+            let actual_end = actual_end.max(actual_start + 0.05);
+            return (actual_start, actual_end);
+        }
+    }
+
+    // Phase 2 — ws is not in silence; trim if we overshoots into one
+    for &(ss, _) in silence_periods {
+        if we > ss && ws < ss {
+            return (ws, ss.max(ws + 0.05));
+        }
+    }
+
+    // Timestamps look fine — return as-is
+    (ws, we)
+}
+
+// ---------------------------------------------------------------------------
 
 fn resolve_paths() -> Result<(PathBuf, PathBuf), String> {
     // Check workspace root relative to execution or common dirs
@@ -280,7 +308,7 @@ fn cancel_analysis() -> Result<(), String> {
         if let Some(pid) = *pid_guard {
             // Kill child process on Windows
             let _ = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .args(["/F", "/T", "/PID", &pid.to_string() as &str])
                 .output();
             *pid_guard = None;
         }
@@ -557,6 +585,22 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
         peaks = vec![0.3; 200];
     }
 
+    // -----------------------------------------------------------------------
+    // Correct Whisper token timestamps using silence-period analysis.
+    // Whisper's per-token timestamps are often placed inside the silence that
+    // follows the word.  The actual speech onset is right after that silence.
+    // -----------------------------------------------------------------------
+    let silence_periods = find_silence_from_peaks(&peaks, meta.duration, 0.12);
+
+    for filler in &mut fillers {
+        let (cs, ce) = snap_filler_timestamps(
+            filler.start, filler.end, &silence_periods, meta.duration
+        );
+        // Round to ms precision to keep display values clean
+        filler.start = (cs * 1000.0).round() / 1000.0;
+        filler.end   = (ce * 1000.0).round() / 1000.0;
+    }
+
     emit_prog(100.0, "Analysis complete!");
 
     Ok(AnalysisResult {
@@ -613,37 +657,7 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
     Ok(format!("Export complete: {}", req.output_path))
 }
 
-#[tauri::command]
-fn play_audio_snippet(_path: String, start: f64, duration: f64) -> Result<(), String> {
-    let cache_dir = PathBuf::from(r"D:\scratch\Remove words\cache");
-    let preview_wav = cache_dir.join("current_preview.wav");
 
-    if !preview_wav.exists() {
-        return Err("Audio preview cache not found. Please re-analyze the file.".into());
-    }
-
-    let tx = ensure_audio_thread();
-    let dur_opt = if duration > 0.0 {
-        Some(Duration::from_secs_f64(duration))
-    } else {
-        None
-    };
-
-    let _ = tx.send(AudioCommand::Play {
-        path: preview_wav,
-        start: Duration::from_secs_f64(start.max(0.0)),
-        duration: dur_opt,
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-fn stop_audio() -> Result<(), String> {
-    let tx = ensure_audio_thread();
-    let _ = tx.send(AudioCommand::Stop);
-    Ok(())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -654,9 +668,7 @@ pub fn run() {
             inspect_media,
             analyze_audio,
             cancel_analysis,
-            export_video,
-            play_audio_snippet,
-            stop_audio
+            export_video
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -39,6 +39,10 @@ interface ProgressPayload {
 let currentMetadata: MediaMetadata | null = null;
 let currentFillers: FillerItem[] = [];
 let audioPeaks: number[] = [];
+let previewTimeoutId: number | null = null;
+
+// Primary audio element — drives all transport playback and region previews
+const previewAudioPlayer = document.getElementById("previewAudioPlayer") as HTMLAudioElement;
 
 // DOM Elements: Import & Metadata
 const dropSection = document.getElementById("dropSection") as HTMLElement;
@@ -134,8 +138,6 @@ const exportBtn = document.getElementById("exportBtn") as HTMLButtonElement;
 let zoomLevel = 1.0; // 1.0 = fit to viewport; up to 50.0x for deep zoom
 let isPlaying = false;
 let currentTime = 0;
-let playbackStartTimestamp = 0;
-let playbackStartOffset = 0;
 let animationFrameId: number | null = null;
 let isDraggingTimeline = false;
 let isSelectingWaveform = false;
@@ -326,6 +328,10 @@ analyzeBtn.addEventListener("click", async () => {
     currentFillers = result.fillers;
     audioPeaks = result.peaks && result.peaks.length > 0 ? result.peaks : [];
 
+    // Wire preview audio to the full-quality WAV produced by the analysis
+    previewAudioPlayer.src = convertFileSrc(result.audio_preview_path);
+    previewAudioPlayer.load();
+
     progressPercent.innerText = "100%";
     progressBar.style.width = "100%";
     progressStatus.innerText = `Detected ${currentFillers.length} filler words! Loading workstation...`;
@@ -374,44 +380,53 @@ function displayWorkstation() {
 }
 
 // -------------------------------------------------------------
-// Synchronized Video & Audio Transport Logic
+// Synchronized Video & Audio Transport Logic — Web Audio API
 // -------------------------------------------------------------
 async function playAudio(fromTime?: number) {
-  if (!currentMetadata) return;
+  if (!currentMetadata || !previewAudioPlayer.src) return;
 
   const seekTime = fromTime !== undefined ? fromTime : currentTime;
   currentTime = seekTime;
-  playbackStartOffset = seekTime;
-  playbackStartTimestamp = performance.now();
 
+  // Cancel any active preview snippet timeout
+  if (previewTimeoutId !== null) {
+    clearTimeout(previewTimeoutId);
+    previewTimeoutId = null;
+  }
+
+  previewAudioPlayer.currentTime = seekTime;
   try {
-    await invoke("play_audio_snippet", {
-      path: currentMetadata.file_path,
-      start: seekTime,
-      duration: 0.0, // 0.0 = continuous playback
-    });
-
-    if (isVideoVisible && videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
-      videoPreviewPlayer.currentTime = seekTime;
-      videoPreviewPlayer.play().catch(() => {});
-    }
-
-    isPlaying = true;
-    updateTransportUI();
-    startPlayheadLoop();
+    await previewAudioPlayer.play();
   } catch (err) {
     console.error("Play audio failed:", err);
+    return;
   }
+
+  if (isVideoVisible && videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
+    videoPreviewPlayer.currentTime = seekTime;
+    videoPreviewPlayer.play().catch(() => {});
+  }
+
+  isPlaying = true;
+  updateTransportUI();
+  startPlayheadLoop();
 }
 
 async function pauseAudio() {
-  if (!isPlaying) return;
-  isPlaying = false;
-  try {
-    await invoke("stop_audio");
-  } catch (err) {
-    console.error("Stop audio failed:", err);
+  // Cancel any active preview snippet timeout
+  if (previewTimeoutId !== null) {
+    clearTimeout(previewTimeoutId);
+    previewTimeoutId = null;
   }
+
+  if (!isPlaying) {
+    // Still stop the audio element in case a preview is running
+    previewAudioPlayer.pause();
+    return;
+  }
+
+  isPlaying = false;
+  previewAudioPlayer.pause();
 
   if (videoPreviewPlayer.src) {
     videoPreviewPlayer.pause();
@@ -480,10 +495,10 @@ function startPlayheadLoop() {
   function loop() {
     if (!isPlaying || !currentMetadata) return;
 
-    const elapsed = (performance.now() - playbackStartTimestamp) / 1000.0;
-    const nowPos = playbackStartOffset + elapsed;
+    // Read directly from the audio element — eliminates performance.now() drift
+    const nowPos = previewAudioPlayer.currentTime;
 
-    if (nowPos >= currentMetadata.duration) {
+    if (previewAudioPlayer.ended || nowPos >= currentMetadata.duration) {
       pauseAudio();
       seekTo(currentMetadata.duration);
       return;
@@ -628,27 +643,29 @@ function renderWaveformTrack() {
   ctx.clearRect(0, 0, totalTrackW, trackHeight);
 
   // 1. Draw True Waveform Peak Geometry
-  const peakCount = audioPeaks.length > 0 ? audioPeaks.length : 200;
-  const barWidth = Math.max(1, totalTrackW / (peakCount * (zoomLevel > 1 ? zoomLevel * 0.4 : 1)));
-  const barStep = barWidth + 1;
-  const totalBars = Math.floor(totalTrackW / barStep);
-
+  // Each peak maps directly to its time-proportional x position — same coordinate
+  // system as mute zones so labels always sit exactly over the right audio content.
   ctx.fillStyle = "#334155";
 
-  for (let i = 0; i < totalBars; i++) {
-    const progress = i / totalBars;
-    let amp = 0.25;
-
-    if (audioPeaks.length > 0) {
-      const peakIndex = Math.min(audioPeaks.length - 1, Math.floor(progress * audioPeaks.length));
-      amp = audioPeaks[peakIndex];
-    } else {
-      amp = Math.sin(progress * Math.PI * 4) * 0.3 + 0.5;
+  if (audioPeaks.length > 0) {
+    const barW = totalTrackW / audioPeaks.length;
+    for (let i = 0; i < audioPeaks.length; i++) {
+      const x = i * barW;
+      const amp = audioPeaks[i];
+      const barH = Math.max(3, amp * (trackHeight * 0.8));
+      const y = (trackHeight - barH) / 2;
+      ctx.fillRect(x, y, Math.max(1, barW - 0.5), barH);
     }
-
-    const barH = Math.max(3, amp * (trackHeight * 0.8));
-    const y = (trackHeight - barH) / 2;
-    ctx.fillRect(i * barStep, y, barWidth, barH);
+  } else {
+    // Placeholder sine wave when no real peaks available
+    const barW = Math.max(1, totalTrackW / 200);
+    for (let i = 0; i < 200; i++) {
+      const x = i * (totalTrackW / 200);
+      const amp = Math.sin((i / 200) * Math.PI * 4) * 0.3 + 0.5;
+      const barH = Math.max(3, amp * (trackHeight * 0.8));
+      const y = (trackHeight - barH) / 2;
+      ctx.fillRect(x, y, Math.max(1, barW - 0.5), barH);
+    }
   }
 
   // 2. Draw Active Mute Zones
@@ -1129,12 +1146,25 @@ selectConfidentBtn.addEventListener("click", () => {
 });
 
 // -------------------------------------------------------------
-// Audio Preview of Exact Muted Region
+// Audio Preview of Exact Muted Region — uses HTMLAudioElement directly
 // -------------------------------------------------------------
 async function previewRegion(start: number, end: number, btn?: HTMLButtonElement) {
-  if (!currentMetadata) return;
+  if (!currentMetadata || !previewAudioPlayer.src) return;
 
-  await pauseAudio();
+  // Cancel any previous preview timeout and stop current playback
+  if (previewTimeoutId !== null) {
+    clearTimeout(previewTimeoutId);
+    previewTimeoutId = null;
+  }
+  previewAudioPlayer.pause();
+  if (isPlaying) {
+    isPlaying = false;
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+    updateTransportUI();
+  }
 
   const paddingMs = parseFloat((document.getElementById("paramPaddingBefore") as HTMLInputElement)?.value) || 30;
   const padSec = paddingMs / 1000.0;
@@ -1143,29 +1173,38 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
   const playEnd = Math.min(currentMetadata.duration, end + padSec);
   const playDuration = Math.max(0.05, playEnd - playStart);
 
+  // Move visual playhead to preview start
+  updatePlayhead(playStart);
+  currentTime = playStart;
+
+  // Seek the audio element and play
+  previewAudioPlayer.currentTime = playStart;
+  try {
+    await previewAudioPlayer.play();
+  } catch (err) {
+    console.error("Preview audio error:", err);
+    return;
+  }
+
+  // Update button state
   if (btn) {
     const originalHtml = btn.innerHTML;
     btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> Playing`;
     btn.style.background = "var(--accent-blue)";
     btn.style.color = "#FFF";
 
-    setTimeout(() => {
+    previewTimeoutId = window.setTimeout(() => {
+      previewAudioPlayer.pause();
       btn.innerHTML = originalHtml;
       btn.style.background = "";
       btn.style.color = "";
+      previewTimeoutId = null;
     }, playDuration * 1000);
-  }
-
-  seekTo(playStart);
-
-  try {
-    await invoke("play_audio_snippet", {
-      path: currentMetadata.file_path,
-      start: playStart,
-      duration: playDuration,
-    });
-  } catch (err) {
-    console.error("Preview audio error:", err);
+  } else {
+    previewTimeoutId = window.setTimeout(() => {
+      previewAudioPlayer.pause();
+      previewTimeoutId = null;
+    }, playDuration * 1000);
   }
 }
 
