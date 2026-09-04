@@ -805,6 +805,24 @@ body {
   right: -10px;
 }
 
+/* Dedicated Custom Mute Toolbar Controls */
+.toolbar-custom-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-app);
+  border: 1px solid var(--accent-purple);
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  margin-left: 8px;
+  animation: pulse-border 2s infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--accent-purple); }
+  50% { border-color: #C4B5FD; }
+}
+
 /* Floating Selection Action Bar */
 .selection-action-bar {
   position: absolute;
@@ -812,22 +830,28 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: rgba(15, 18, 26, 0.94);
-  border: 1px solid var(--border-color);
-  padding: 3px 8px;
+  background: rgba(15, 18, 26, 0.96);
+  border: 1px solid var(--accent-purple);
+  padding: 4px 10px;
   border-radius: var(--radius-xs);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
-  z-index: 20;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.8), 0 0 10px rgba(139, 92, 246, 0.4);
+  z-index: 100;
   white-space: nowrap;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+}
+
+.selection-action-bar button {
+  pointer-events: auto !important;
+  cursor: pointer !important;
 }
 
 .selection-dur-badge {
   font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--accent-purple);
-  margin-right: 2px;
+  margin-right: 4px;
 }
 
 /* Timeline Tooltip */

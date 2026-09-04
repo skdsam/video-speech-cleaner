@@ -164,6 +164,13 @@ const selCancelBtn = document.getElementById("selCancelBtn") as HTMLButtonElemen
 const selectionHandleLeft = document.getElementById("selectionHandleLeft") as HTMLElement;
 const selectionHandleRight = document.getElementById("selectionHandleRight") as HTMLElement;
 
+// Toolbar Dedicated Custom Mute Controls
+const toolbarCustomMuteControls = document.getElementById("toolbarCustomMuteControls") as HTMLElement;
+const toolbarSelectionDurationText = document.getElementById("toolbarSelectionDurationText") as HTMLElement;
+const toolbarSelPreviewBtn = document.getElementById("toolbarSelPreviewBtn") as HTMLButtonElement;
+const toolbarSelAddMuteBtn = document.getElementById("toolbarSelAddMuteBtn") as HTMLButtonElement;
+const toolbarSelCancelBtn = document.getElementById("toolbarSelCancelBtn") as HTMLButtonElement;
+
 // -------------------------------------------------------------
 // File Pick & Loading
 // -------------------------------------------------------------
@@ -651,6 +658,7 @@ waveformViewport.addEventListener(
 waveformViewport.addEventListener("scroll", () => {
   updateMinimapViewport();
   renderRuler();
+  updateSelectionUI();
 });
 
 // -------------------------------------------------------------
@@ -1231,19 +1239,29 @@ function showSelectionActionBar() {
 
   if (selDur <= 0.03) {
     selectionActionBar.style.display = "none";
+    toolbarCustomMuteControls.style.display = "none";
     return;
   }
 
+  const scrollLeft = waveformViewport.scrollLeft;
+  const viewportW = waveformViewport.clientWidth;
   const leftPx = (s / duration) * totalTrackW;
   const rightPx = (e / duration) * totalTrackW;
   const midX = (leftPx + rightPx) / 2;
 
-  selectionDurationText.innerText = `${formatTimecode(s)} → ${formatTimecode(e)} (${selDur.toFixed(2)}s)`;
+  // Compute screen X position relative to waveformViewport container
+  const screenMidX = midX - scrollLeft;
+  const barW = 270;
+  const clampedScreenX = Math.max(10, Math.min(viewportW - barW - 10, screenMidX - barW / 2));
+
+  const durStr = `${formatTimecode(s)} → ${formatTimecode(e)} (${selDur.toFixed(2)}s)`;
+  selectionDurationText.innerText = durStr;
+  toolbarSelectionDurationText.innerText = durStr;
+
+  // Show both the floating bar above the selection AND the fixed toolbar controls
   selectionActionBar.style.display = "flex";
-  // Center action bar over selection (clamped within track)
-  const barW = 260;
-  const clampedX = Math.max(10, Math.min(totalTrackW - barW - 10, midX - barW / 2));
-  selectionActionBar.style.left = `${clampedX}px`;
+  selectionActionBar.style.left = `${clampedScreenX}px`;
+  toolbarCustomMuteControls.style.display = "flex";
 }
 
 function clearSelectionRange() {
@@ -1251,6 +1269,7 @@ function clearSelectionRange() {
   selectionEndTime = null;
   timelineSelection.style.display = "none";
   selectionActionBar.style.display = "none";
+  toolbarCustomMuteControls.style.display = "none";
 }
 
 // Floating Action Bar Buttons
@@ -1269,6 +1288,26 @@ selAddMuteBtn.addEventListener("click", (e) => {
 });
 
 selCancelBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  exitCustomMuteMode();
+});
+
+// Toolbar Dedicated Custom Mute Buttons
+toolbarSelPreviewBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (selectionStartTime !== null && selectionEndTime !== null) {
+    const s = Math.min(selectionStartTime, selectionEndTime);
+    const end = Math.max(selectionStartTime, selectionEndTime);
+    previewRegion(s, end);
+  }
+});
+
+toolbarSelAddMuteBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  commitSelectionAsMute();
+});
+
+toolbarSelCancelBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   exitCustomMuteMode();
 });

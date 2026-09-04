@@ -174,6 +174,21 @@
           <div class="track-toolbar-left">
             <span class="track-title">Audio Track 1</span>
             <span id="timelineHintText" class="timeline-hint">Scroll to Zoom • Drag region edges to resize</span>
+
+            <!-- Dedicated Custom Mute Selection Toolbar Controls -->
+            <div id="toolbarCustomMuteControls" class="toolbar-custom-controls" style="display: none;">
+              <span id="toolbarSelectionDurationText" class="selection-dur-badge">0.00s</span>
+              <button id="toolbarSelPreviewBtn" class="btn btn-xs btn-primary" title="Preview selected audio clip (Space)">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Preview
+              </button>
+              <button id="toolbarSelAddMuteBtn" class="btn btn-xs btn-primary" style="background: var(--accent-purple); border-color: var(--accent-purple);" title="Apply mute to this area and exit custom mode">
+                ✓ Apply Mute
+              </button>
+              <button id="toolbarSelCancelBtn" class="btn btn-xs btn-secondary" title="Cancel (Esc)">✕ Cancel</button>
+            </div>
           </div>
 
           <div class="zoom-controls">
@@ -203,30 +218,32 @@
         </div>
 
         <!-- Deep Zoomable Waveform Viewport -->
-        <div class="waveform-viewport" id="waveformViewport">
-          <div class="waveform-canvas-container" id="waveformContainer">
-            <canvas id="waveformCanvas"></canvas>
-            <div id="playheadLine" class="playhead-line" style="display: none;"></div>
-            <div id="timelineSelection" class="timeline-selection" style="display: none;">
-              <div class="selection-handle handle-left" id="selectionHandleLeft"></div>
-              <div class="selection-handle handle-right" id="selectionHandleRight"></div>
+        <div class="waveform-viewport-wrapper" style="position: relative;">
+          <div class="waveform-viewport" id="waveformViewport">
+            <div class="waveform-canvas-container" id="waveformContainer">
+              <canvas id="waveformCanvas"></canvas>
+              <div id="playheadLine" class="playhead-line" style="display: none;"></div>
+              <div id="timelineSelection" class="timeline-selection" style="display: none;">
+                <div class="selection-handle handle-left" id="selectionHandleLeft"></div>
+                <div class="selection-handle handle-right" id="selectionHandleRight"></div>
+              </div>
+              <div id="timelineHoverTooltip" class="timeline-tooltip" style="display: none;">00:00:00.00</div>
             </div>
-            <div id="timelineHoverTooltip" class="timeline-tooltip" style="display: none;">00:00:00.00</div>
+          </div>
 
-            <!-- Floating Selection Action Bar -->
-            <div id="selectionActionBar" class="selection-action-bar" style="display: none;">
-              <span id="selectionDurationText" class="selection-dur-badge">0.00s</span>
-              <button id="selPreviewBtn" class="btn btn-xs btn-primary" title="Preview selected audio clip (Space)">
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-                  <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                Preview
-              </button>
-              <button id="selAddMuteBtn" class="btn btn-xs btn-primary" style="background: var(--accent-purple); border-color: var(--accent-purple);" title="Apply mute to this area and exit custom mode">
-                ✓ Apply Mute
-              </button>
-              <button id="selCancelBtn" class="btn btn-xs btn-secondary" title="Cancel (Esc)">✕ Cancel</button>
-            </div>
+          <!-- Floating Selection Action Bar (Positioned over viewport wrapper so clicks are never intercepted) -->
+          <div id="selectionActionBar" class="selection-action-bar" style="display: none;">
+            <span id="selectionDurationText" class="selection-dur-badge">0.00s</span>
+            <button id="selPreviewBtn" class="btn btn-xs btn-primary" title="Preview selected audio clip (Space)">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+              Preview
+            </button>
+            <button id="selAddMuteBtn" class="btn btn-xs btn-primary" style="background: var(--accent-purple); border-color: var(--accent-purple);" title="Apply mute to this area and exit custom mode">
+              ✓ Apply Mute
+            </button>
+            <button id="selCancelBtn" class="btn btn-xs btn-secondary" title="Cancel (Esc)">✕ Cancel</button>
           </div>
         </div>
 
