@@ -40,6 +40,8 @@ let currentMetadata: MediaMetadata | null = null;
 let currentFillers: FillerItem[] = [];
 let audioPeaks: number[] = [];
 let previewTimeoutId: number | null = null;
+let previewAnimationFrameId: number | null = null;
+let previewStopCleanup: (() => void) | null = null;
 
 // Primary audio element — drives all transport playback and region previews
 const previewAudioPlayer = document.getElementById("previewAudioPlayer") as HTMLAudioElement;
@@ -414,10 +416,18 @@ async function playAudio(fromTime?: number) {
   const seekTime = fromTime !== undefined ? fromTime : currentTime;
   currentTime = seekTime;
 
-  // Cancel any active preview snippet timeout
+  // Cancel any active preview snippet
+  if (previewStopCleanup) {
+    previewStopCleanup();
+    previewStopCleanup = null;
+  }
   if (previewTimeoutId !== null) {
     clearTimeout(previewTimeoutId);
     previewTimeoutId = null;
+  }
+  if (previewAnimationFrameId !== null) {
+    cancelAnimationFrame(previewAnimationFrameId);
+    previewAnimationFrameId = null;
   }
 
   previewAudioPlayer.currentTime = seekTime;
@@ -439,10 +449,18 @@ async function playAudio(fromTime?: number) {
 }
 
 async function pauseAudio() {
-  // Cancel any active preview snippet timeout
+  // Cancel any active preview snippet
+  if (previewStopCleanup) {
+    previewStopCleanup();
+    previewStopCleanup = null;
+  }
   if (previewTimeoutId !== null) {
     clearTimeout(previewTimeoutId);
     previewTimeoutId = null;
+  }
+  if (previewAnimationFrameId !== null) {
+    cancelAnimationFrame(previewAnimationFrameId);
+    previewAnimationFrameId = null;
   }
 
   if (!isPlaying) {
@@ -597,7 +615,10 @@ window.addEventListener("keydown", (e) => {
 // -------------------------------------------------------------
 function setZoom(newZoom: number, anchorRatio: number = 0.5) {
   if (!currentMetadata) return;
-  const clamped = Math.max(1.0, Math.min(50.0, newZoom));
+  const viewportW = waveformViewport.clientWidth || 800;
+  // Chromium canvas dimension hard limit is 32767px. We clamp to a safe max of 28000px or 25x.
+  const maxSafeZoom = Math.min(25.0, Math.max(1.5, Math.floor(28000 / viewportW)));
+  const clamped = Math.max(1.0, Math.min(maxSafeZoom, newZoom));
   const oldZoom = zoomLevel;
   zoomLevel = clamped;
 
@@ -605,7 +626,6 @@ function setZoom(newZoom: number, anchorRatio: number = 0.5) {
   zoomLevelDisplay.innerText = `${zoomLevel.toFixed(1)}x`;
 
   // Preserve scroll anchor location under mouse cursor
-  const viewportW = waveformViewport.clientWidth;
   const oldScrollLeft = waveformViewport.scrollLeft;
   const anchorX = oldScrollLeft + viewportW * anchorRatio;
   const anchorTimeRatio = anchorX / (viewportW * oldZoom);
@@ -615,7 +635,7 @@ function setZoom(newZoom: number, anchorRatio: number = 0.5) {
   updateMinimapViewport();
   updateSelectionUI();
 
-  const newTotalW = viewportW * zoomLevel;
+  const newTotalW = Math.round(viewportW * zoomLevel);
   waveformViewport.scrollLeft = Math.max(0, anchorTimeRatio * newTotalW - viewportW * anchorRatio);
 }
 
@@ -675,7 +695,7 @@ function renderWaveformTrack() {
   if (!currentMetadata) return;
 
   const viewportW = waveformViewport.clientWidth || 800;
-  const totalTrackW = Math.round(viewportW * zoomLevel);
+  const totalTrackW = Math.min(28000, Math.max(viewportW, Math.round(viewportW * zoomLevel)));
   const trackHeight = waveformCanvas.offsetHeight || 110;
 
   waveformCanvas.width = totalTrackW;
@@ -1575,11 +1595,20 @@ selectConfidentBtn.addEventListener("click", () => {
 async function previewRegion(start: number, end: number, btn?: HTMLButtonElement) {
   if (!currentMetadata || !previewAudioPlayer.src) return;
 
-  // Cancel any previous preview timeout and stop current playback
+  // Clean up any existing preview or transport playback
+  if (previewStopCleanup) {
+    previewStopCleanup();
+    previewStopCleanup = null;
+  }
   if (previewTimeoutId !== null) {
     clearTimeout(previewTimeoutId);
     previewTimeoutId = null;
   }
+  if (previewAnimationFrameId !== null) {
+    cancelAnimationFrame(previewAnimationFrameId);
+    previewAnimationFrameId = null;
+  }
+
   previewAudioPlayer.pause();
   if (isPlaying) {
     isPlaying = false;
@@ -1590,45 +1619,85 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
     updateTransportUI();
   }
 
+  // Padding only applies to detected words; for precise custom selection, we give a tiny 50ms buffer at end
   const paddingMs = parseFloat((document.getElementById("paramPaddingBefore") as HTMLInputElement)?.value) || 30;
   const padSec = paddingMs / 1000.0;
 
   const playStart = Math.max(0, start - padSec);
-  const playEnd = Math.min(currentMetadata.duration, end + padSec);
-  const playDuration = Math.max(0.05, playEnd - playStart);
+  // Guarantee preview plays at least through the entire selected end plus 80ms so the last syllable isn't cut off
+  const playEnd = Math.min(currentMetadata.duration, end + Math.max(0.08, padSec));
 
   // Move visual playhead to preview start
   updatePlayhead(playStart);
   currentTime = playStart;
 
-  // Seek the audio element and play
-  previewAudioPlayer.currentTime = playStart;
-  try {
-    await previewAudioPlayer.play();
-  } catch (err) {
-    console.error("Preview audio error:", err);
-    return;
-  }
-
-  // Update button state
+  let originalBtnHtml = "";
   if (btn) {
-    const originalHtml = btn.innerHTML;
+    originalBtnHtml = btn.innerHTML;
     btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> Playing`;
     btn.style.background = "var(--accent-blue)";
     btn.style.color = "#FFF";
+  }
 
-    previewTimeoutId = window.setTimeout(() => {
-      previewAudioPlayer.pause();
-      btn.innerHTML = originalHtml;
+  const stopPreview = () => {
+    previewAudioPlayer.pause();
+    if (previewAnimationFrameId !== null) {
+      cancelAnimationFrame(previewAnimationFrameId);
+      previewAnimationFrameId = null;
+    }
+    if (previewTimeoutId !== null) {
+      clearTimeout(previewTimeoutId);
+      previewTimeoutId = null;
+    }
+    previewAudioPlayer.removeEventListener("timeupdate", onTimeUpdate);
+    previewAudioPlayer.removeEventListener("ended", stopPreview);
+
+    if (btn) {
+      btn.innerHTML = originalBtnHtml;
       btn.style.background = "";
       btn.style.color = "";
-      previewTimeoutId = null;
-    }, playDuration * 1000);
-  } else {
-    previewTimeoutId = window.setTimeout(() => {
-      previewAudioPlayer.pause();
-      previewTimeoutId = null;
-    }, playDuration * 1000);
+    }
+    previewStopCleanup = null;
+  };
+
+  previewStopCleanup = stopPreview;
+
+  const onTimeUpdate = () => {
+    const pos = previewAudioPlayer.currentTime;
+    if (pos >= playEnd || previewAudioPlayer.ended) {
+      stopPreview();
+    } else {
+      currentTime = pos;
+      updatePlayhead(pos);
+    }
+  };
+
+  const previewFrameLoop = () => {
+    if (!previewStopCleanup) return;
+    const pos = previewAudioPlayer.currentTime;
+    if (pos >= playEnd || previewAudioPlayer.ended) {
+      stopPreview();
+      return;
+    }
+    currentTime = pos;
+    updatePlayhead(pos);
+    previewAnimationFrameId = requestAnimationFrame(previewFrameLoop);
+  };
+
+  previewAudioPlayer.addEventListener("timeupdate", onTimeUpdate);
+  previewAudioPlayer.addEventListener("ended", stopPreview);
+
+  // Seek and play
+  previewAudioPlayer.currentTime = playStart;
+  try {
+    await previewAudioPlayer.play();
+    previewAnimationFrameId = requestAnimationFrame(previewFrameLoop);
+    // Safety fallback timeout in case timeupdate is delayed by OS
+    const maxSafetyDuration = Math.max(1.0, (playEnd - playStart) * 1.5 + 2.0);
+    previewTimeoutId = window.setTimeout(stopPreview, maxSafetyDuration * 1000);
+  } catch (err) {
+    console.error("Preview audio error:", err);
+    stopPreview();
   }
 }
 
