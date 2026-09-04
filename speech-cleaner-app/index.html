@@ -173,25 +173,7 @@
         <div class="track-toolbar">
           <div class="track-toolbar-left">
             <span class="track-title">Audio Track 1</span>
-            <div class="mode-toggles">
-              <button id="modeScrubBtn" class="btn btn-secondary btn-xs active-mode" title="Scrub & Seek Mode (V)">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                Scrub (V)
-              </button>
-              <button id="modeSelectBtn" class="btn btn-secondary btn-xs" title="Drag to Select Range Mode (R)">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/>
-                </svg>
-                Select Range (R)
-              </button>
-            </div>
-            <div class="inout-quick-btns">
-              <button id="quickMarkInBtn" class="btn btn-secondary btn-xs" title="Set In-point at Playhead (Press 'I')">Mark In [I]</button>
-              <button id="quickMarkOutBtn" class="btn btn-secondary btn-xs" title="Set Out-point at Playhead (Press 'O')">Mark Out [O]</button>
-            </div>
-            <span class="timeline-hint">Scroll to Zoom • Drag edges to resize • [I]/[O] to mark range</span>
+            <span id="timelineHintText" class="timeline-hint">Scroll to Zoom • Drag region edges to resize</span>
           </div>
 
           <div class="zoom-controls">
@@ -240,10 +222,10 @@
                 </svg>
                 Preview
               </button>
-              <button id="selAddMuteBtn" class="btn btn-xs btn-danger" title="Create mute region from selection (Enter or M)">
-                + Add Mute
+              <button id="selAddMuteBtn" class="btn btn-xs btn-primary" style="background: var(--accent-purple); border-color: var(--accent-purple);" title="Apply mute to this area and exit custom mode">
+                ✓ Apply Mute
               </button>
-              <button id="selCancelBtn" class="btn btn-xs btn-secondary" title="Clear selection (Esc)">✕</button>
+              <button id="selCancelBtn" class="btn btn-xs btn-secondary" title="Cancel (Esc)">✕ Cancel</button>
             </div>
           </div>
         </div>

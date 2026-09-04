@@ -139,13 +139,11 @@ let zoomLevel = 1.0; // 1.0 = fit to viewport; up to 50.0x for deep zoom
 let isPlaying = false;
 let currentTime = 0;
 let animationFrameId: number | null = null;
-// Selection & Tool Mode State
-let currentToolMode: "scrub" | "select" = "scrub";
-let isSelectingWaveform = false;
 let isDraggingTimeline = false;
 let isDraggingMinimap = false;
-let selectionStartX = 0;
-let selectionCurrentX = 0;
+// Custom Mute 2-Click Interactive Mode State
+let isCustomMuteMode = false;
+let customMuteStep: "awaiting_start" | "awaiting_end" | "selected" = "awaiting_start";
 let selectionStartTime: number | null = null;
 let selectionEndTime: number | null = null;
 
@@ -156,10 +154,7 @@ let resizingRegion: ResizingEdge = null;
 let resizingSelectionEdge: "start" | "end" | null = null;
 
 // Tool & Selection DOM Elements
-const modeScrubBtn = document.getElementById("modeScrubBtn") as HTMLButtonElement;
-const modeSelectBtn = document.getElementById("modeSelectBtn") as HTMLButtonElement;
-const quickMarkInBtn = document.getElementById("quickMarkInBtn") as HTMLButtonElement;
-const quickMarkOutBtn = document.getElementById("quickMarkOutBtn") as HTMLButtonElement;
+const timelineHintText = document.getElementById("timelineHintText") as HTMLElement;
 const selectionActionBar = document.getElementById("selectionActionBar") as HTMLElement;
 const selectionDurationText = document.getElementById("selectionDurationText") as HTMLElement;
 const selPreviewBtn = document.getElementById("selPreviewBtn") as HTMLButtonElement;
@@ -565,39 +560,27 @@ timelineScrubber.addEventListener("input", () => {
   seekTo(target);
 });
 
-// Global Keyboard Shortcuts (Space: Play/Pause, I: Mark In, O: Mark Out, R: Select Mode, V: Scrub Mode, Enter/M: Add Mute, Esc: Clear Selection)
+// Global Keyboard Shortcuts (Space: Play/Pause or Preview selection, Enter: Apply Mute, Esc: Cancel)
 window.addEventListener("keydown", (e) => {
   const activeEl = document.activeElement as HTMLElement | null;
   const isInputActive = activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA");
 
   if (e.code === "Space" && !isInputActive) {
     e.preventDefault();
-    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.05) {
-      // If a range is selected, Space plays the selection preview
+    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.04) {
+      // If a range is selected, Space auditions that clip
       previewRegion(Math.min(selectionStartTime, selectionEndTime), Math.max(selectionStartTime, selectionEndTime));
     } else {
       if (isPlaying) pauseAudio();
       else playAudio();
     }
-  } else if ((e.key === "i" || e.key === "I") && !isInputActive) {
-    e.preventDefault();
-    setInPointAtPlayhead();
-  } else if ((e.key === "o" || e.key === "O") && !isInputActive) {
-    e.preventDefault();
-    setOutPointAtPlayhead();
-  } else if ((e.key === "r" || e.key === "R") && !isInputActive) {
-    e.preventDefault();
-    setToolMode("select");
-  } else if ((e.key === "v" || e.key === "V") && !isInputActive) {
-    e.preventDefault();
-    setToolMode("scrub");
-  } else if ((e.key === "m" || e.key === "M" || e.key === "Enter") && !isInputActive) {
-    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.05) {
+  } else if (e.key === "Enter" && !isInputActive) {
+    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.04) {
       e.preventDefault();
       commitSelectionAsMute();
     }
   } else if (e.key === "Escape") {
-    clearSelectionRange();
+    exitCustomMuteMode();
   }
 });
 
@@ -622,6 +605,7 @@ function setZoom(newZoom: number, anchorRatio: number = 0.5) {
   renderWaveformTrack();
   renderRuler();
   updateMinimapViewport();
+  updateSelectionUI();
 
   const newTotalW = viewportW * zoomLevel;
   waveformViewport.scrollLeft = Math.max(0, anchorTimeRatio * newTotalW - viewportW * anchorRatio);
@@ -675,6 +659,7 @@ function renderAllViews() {
   renderWaveformTrack();
   renderMinimap();
   renderRuler();
+  updateSelectionUI();
 }
 
 function renderWaveformTrack() {
@@ -957,9 +942,8 @@ waveformContainer.addEventListener("mousemove", (e) => {
 
   timelineHoverTooltip.style.display = "block";
   timelineHoverTooltip.style.left = `${relX}px`;
-  timelineHoverTooltip.innerText = formatTimecode(t);
 
-  // If currently dragging an existing region edge
+  // 1. If currently dragging an existing region edge
   if (resizingRegion) {
     const filler = currentFillers.find((f) => f.id === resizingRegion!.fillerId);
     if (filler) {
@@ -977,38 +961,48 @@ waveformContainer.addEventListener("mousemove", (e) => {
     return;
   }
 
-  // If currently dragging selection handle
+  // 2. If currently dragging selection handle
   if (resizingSelectionEdge) {
     if (resizingSelectionEdge === "start") {
-      selectionStartTime = Math.min(t, (selectionEndTime ?? t) - 0.05);
+      selectionStartTime = Math.max(0, Math.min(t, (selectionEndTime ?? t) - 0.04));
     } else {
-      selectionEndTime = Math.max(t, (selectionStartTime ?? t) + 0.05);
+      selectionEndTime = Math.min(currentMetadata.duration, Math.max(t, (selectionStartTime ?? t) + 0.04));
     }
     updateSelectionUI();
+    timelineHoverTooltip.innerText = `NUDGE: ${formatTimecode(resizingSelectionEdge === "start" ? selectionStartTime! : selectionEndTime!)}`;
     return;
   }
 
-  // Check cursor style for region edges when hovering
-  if (!isSelectingWaveform && !isDraggingTimeline) {
-    const nearEdge = findRegionEdgeNearX(t, totalTrackW);
-    if (nearEdge) {
-      waveformContainer.style.cursor = "ew-resize";
-    } else if (currentToolMode === "select" || e.altKey) {
+  // 3. If in custom mute mode
+  if (isCustomMuteMode) {
+    if (customMuteStep === "awaiting_start") {
+      timelineHoverTooltip.innerText = `CLICK START: ${formatTimecode(t)}`;
       waveformContainer.style.cursor = "crosshair";
-    } else {
+    } else if (customMuteStep === "awaiting_end" && selectionStartTime !== null) {
+      selectionEndTime = t;
+      updateSelectionUI();
+      const s = Math.min(selectionStartTime, selectionEndTime);
+      const endT = Math.max(selectionStartTime, selectionEndTime);
+      timelineHoverTooltip.innerText = `CLICK END: ${formatTimecode(t)} (Span: ${(endT - s).toFixed(2)}s)`;
+      waveformContainer.style.cursor = "crosshair";
+      return;
+    } else if (customMuteStep === "selected") {
+      timelineHoverTooltip.innerText = formatTimecode(t);
       waveformContainer.style.cursor = "default";
+    }
+  } else {
+    timelineHoverTooltip.innerText = formatTimecode(t);
+    if (!isDraggingTimeline) {
+      const nearEdge = findRegionEdgeNearX(t, totalTrackW);
+      if (nearEdge) {
+        waveformContainer.style.cursor = "ew-resize";
+      } else {
+        waveformContainer.style.cursor = "default";
+      }
     }
   }
 
-  // Handling range drag selection
-  if (isSelectingWaveform) {
-    selectionCurrentX = relX;
-    const startX = selectionStartX;
-    const endX = selectionCurrentX;
-    selectionStartTime = (Math.min(startX, endX) / totalTrackW) * currentMetadata.duration;
-    selectionEndTime = (Math.max(startX, endX) / totalTrackW) * currentMetadata.duration;
-    updateSelectionUI();
-  } else if (isDraggingTimeline) {
+  if (isDraggingTimeline) {
     seekTo(t);
   }
 });
@@ -1021,10 +1015,42 @@ waveformContainer.addEventListener("mousedown", (e) => {
   if (!currentMetadata) return;
   const clickTime = getTimestampFromClientX(e.clientX);
   const rect = waveformContainer.getBoundingClientRect();
-  const relX = e.clientX - rect.left;
   const totalTrackW = waveformCanvas.width || rect.width;
 
-  // 1. First priority: check if user clicked on an edge handle of an existing mute region
+  // If user is dragging selection handles, let handle listeners deal with it
+  if (resizingSelectionEdge) return;
+
+  // If in custom mute mode: 2-click process
+  if (isCustomMuteMode) {
+    if (e.button !== 0) return; // Left click only for custom mute selection
+    e.preventDefault();
+
+    if (customMuteStep === "awaiting_start") {
+      // First click: Set Start
+      selectionStartTime = clickTime;
+      selectionEndTime = clickTime;
+      customMuteStep = "awaiting_end";
+      timelineHintText.innerText = "Now move your cursor and click the END position on the audio timeline";
+      updateSelectionUI();
+    } else if (customMuteStep === "awaiting_end") {
+      // Second click: Set End & lock in range
+      selectionEndTime = clickTime;
+      const s = Math.min(selectionStartTime!, selectionEndTime);
+      const endT = Math.max(selectionStartTime!, selectionEndTime);
+      selectionStartTime = s;
+      selectionEndTime = Math.max(s + 0.05, endT);
+      customMuteStep = "selected";
+      waveformContainer.style.cursor = "default";
+      timelineHintText.innerText = "Area selected! Drag handles to adjust, then click 'Apply Mute' (or press Enter)";
+      updateSelectionUI();
+    } else if (customMuteStep === "selected") {
+      // If user clicks outside the selection while already selected, seek or let them adjust
+      seekTo(clickTime);
+    }
+    return;
+  }
+
+  // 1. Check if user clicked on an edge handle of an existing mute region
   const edgeHit = findRegionEdgeNearX(clickTime, totalTrackW);
   if (edgeHit && e.button === 0) {
     resizingRegion = { fillerId: edgeHit.filler.id, edge: edgeHit.edge };
@@ -1043,8 +1069,7 @@ waveformContainer.addEventListener("mousedown", (e) => {
     }
   }
 
-  // In scrub mode, clicking inside a filler zone toggles its enabled status
-  if (hitIndex !== -1 && currentToolMode === "scrub" && !e.altKey) {
+  if (hitIndex !== -1) {
     currentFillers[hitIndex].enabled = !currentFillers[hitIndex].enabled;
     renderFillersList();
     updateSummary();
@@ -1052,19 +1077,9 @@ waveformContainer.addEventListener("mousedown", (e) => {
     return;
   }
 
-  // 3. Selection mode OR Alt-drag initiates range selection
-  if (currentToolMode === "select" || e.altKey) {
-    isSelectingWaveform = true;
-    selectionStartX = relX;
-    selectionCurrentX = relX;
-    selectionStartTime = clickTime;
-    selectionEndTime = clickTime;
-    updateSelectionUI();
-  } else {
-    // Normal scrub / playhead repositioning
-    isDraggingTimeline = true;
-    seekTo(clickTime);
-  }
+  // Normal scrub / playhead repositioning
+  isDraggingTimeline = true;
+  seekTo(clickTime);
 });
 
 window.addEventListener("mouseup", () => {
@@ -1079,16 +1094,6 @@ window.addEventListener("mouseup", () => {
 
   if (isDraggingTimeline) {
     isDraggingTimeline = false;
-  }
-
-  if (isSelectingWaveform) {
-    isSelectingWaveform = false;
-    if (selectionStartTime !== null && selectionEndTime !== null && Math.abs(selectionEndTime - selectionStartTime) > 0.04) {
-      // Keep selection visible and show floating action bar
-      showSelectionActionBar();
-    } else {
-      clearSelectionRange();
-    }
   }
 });
 
@@ -1148,44 +1153,6 @@ function clearSelectionRange() {
   selectionActionBar.style.display = "none";
 }
 
-// In / Out point setting
-function setInPointAtPlayhead() {
-  if (!currentMetadata) return;
-  selectionStartTime = currentTime;
-  if (selectionEndTime === null || selectionEndTime <= selectionStartTime) {
-    selectionEndTime = Math.min(currentMetadata.duration, currentTime + 0.5);
-  }
-  updateSelectionUI();
-}
-
-function setOutPointAtPlayhead() {
-  if (!currentMetadata) return;
-  selectionEndTime = currentTime;
-  if (selectionStartTime === null || selectionStartTime >= selectionEndTime) {
-    selectionStartTime = Math.max(0, currentTime - 0.5);
-  }
-  updateSelectionUI();
-}
-
-// Tool Mode Switcher
-function setToolMode(mode: "scrub" | "select") {
-  currentToolMode = mode;
-  if (mode === "scrub") {
-    modeScrubBtn.classList.add("active-mode");
-    modeSelectBtn.classList.remove("active-mode");
-    waveformContainer.style.cursor = "default";
-  } else {
-    modeSelectBtn.classList.add("active-mode");
-    modeScrubBtn.classList.remove("active-mode");
-    waveformContainer.style.cursor = "crosshair";
-  }
-}
-
-modeScrubBtn.addEventListener("click", () => setToolMode("scrub"));
-modeSelectBtn.addEventListener("click", () => setToolMode("select"));
-quickMarkInBtn.addEventListener("click", () => setInPointAtPlayhead());
-quickMarkOutBtn.addEventListener("click", () => setOutPointAtPlayhead());
-
 // Floating Action Bar Buttons
 selPreviewBtn.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -1203,8 +1170,37 @@ selAddMuteBtn.addEventListener("click", (e) => {
 
 selCancelBtn.addEventListener("click", (e) => {
   e.stopPropagation();
-  clearSelectionRange();
+  exitCustomMuteMode();
 });
+
+function enterCustomMuteMode() {
+  isCustomMuteMode = true;
+  customMuteStep = "awaiting_start";
+  selectionStartTime = null;
+  selectionEndTime = null;
+  timelineSelection.style.display = "none";
+  selectionActionBar.style.display = "none";
+  openAddCustomModalBtn.classList.add("custom-mute-armed");
+  openAddCustomModalBtn.innerHTML = `✕ Cancel Custom Mute`;
+  waveformContainer.style.cursor = "crosshair";
+  timelineHintText.innerText = "Click on the audio timeline to set the START of your custom mute";
+}
+
+function exitCustomMuteMode() {
+  isCustomMuteMode = false;
+  customMuteStep = "awaiting_start";
+  clearSelectionRange();
+  openAddCustomModalBtn.classList.remove("custom-mute-armed");
+  openAddCustomModalBtn.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+    + Add Custom Mute
+  `;
+  waveformContainer.style.cursor = "default";
+  timelineHintText.innerText = "Scroll to Zoom • Drag region edges to resize";
+}
 
 function commitSelectionAsMute() {
   if (!currentMetadata || selectionStartTime === null || selectionEndTime === null) return;
@@ -1224,7 +1220,7 @@ function commitSelectionAsMute() {
   currentFillers.push(newItem);
   currentFillers.sort((a, b) => a.start - b.start);
 
-  clearSelectionRange();
+  exitCustomMuteMode();
   renderFillersList();
   updateSummary();
   renderAllViews();
@@ -1239,6 +1235,15 @@ selectionHandleLeft.addEventListener("mousedown", (e) => {
 selectionHandleRight.addEventListener("mousedown", (e) => {
   e.stopPropagation();
   resizingSelectionEdge = "end";
+});
+
+// Toggle Custom Mute Mode via Button
+openAddCustomModalBtn.addEventListener("click", () => {
+  if (isCustomMuteMode) {
+    exitCustomMuteMode();
+  } else {
+    enterCustomMuteMode();
+  }
 });
 
 waveformContainer.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -1259,16 +1264,6 @@ waveformContainer.addEventListener("dblclick", (e) => {
 // -------------------------------------------------------------
 // Manual Addition Controls
 // -------------------------------------------------------------
-openAddCustomModalBtn.addEventListener("click", () => {
-  if (manualAddPanel.style.display === "none") {
-    manualAddPanel.style.display = "block";
-    manualStartInput.value = currentTime.toFixed(3);
-    manualEndInput.value = Math.min(currentMetadata ? currentMetadata.duration : 10, currentTime + 0.6).toFixed(3);
-    manualWordInput.focus();
-  } else {
-    manualAddPanel.style.display = "none";
-  }
-});
 
 btnSetStartCurrent.addEventListener("click", () => {
   manualStartInput.value = currentTime.toFixed(3);

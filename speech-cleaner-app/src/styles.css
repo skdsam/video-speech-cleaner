@@ -737,17 +737,18 @@ body {
   border-top: 6px solid var(--accent-cyan);
 }
 
-/* Mode Toggles and In/Out Quick Buttons */
-.mode-toggles, .inout-quick-btns {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+/* Custom Mute Active / Armed State */
+.btn.custom-mute-armed {
+  background: var(--accent-purple) !important;
+  border-color: #C4B5FD !important;
+  color: #FFF !important;
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.6);
+  animation: pulse-glow 1.5s infinite;
 }
 
-.mode-toggles .btn.active-mode {
-  background: var(--accent-blue) !important;
-  color: #FFF !important;
-  border-color: var(--accent-blue) !important;
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.9; transform: scale(1.02); }
 }
 
 /* Timeline Selection Drag & Handles */
@@ -755,7 +756,7 @@ body {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: rgba(139, 92, 246, 0.22);
+  background: rgba(139, 92, 246, 0.25);
   border-left: 2px solid var(--accent-purple);
   border-right: 2px solid var(--accent-purple);
   z-index: 8;
@@ -766,18 +767,37 @@ body {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 8px;
+  width: 14px;
   cursor: ew-resize;
   pointer-events: auto;
-  z-index: 9;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.selection-handle::after {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 36px;
+  background: #C4B5FD;
+  border-radius: 2px;
+  box-shadow: 0 0 6px rgba(139, 92, 246, 0.8);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.selection-handle:hover::after {
+  background: #FFFFFF;
+  transform: scaleY(1.2);
 }
 
 .selection-handle.handle-left {
-  left: -4px;
+  left: -7px;
 }
 
 .selection-handle.handle-right {
-  right: -4px;
+  right: -7px;
 }
 
 /* Floating Selection Action Bar */
