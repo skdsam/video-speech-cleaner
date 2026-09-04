@@ -669,10 +669,34 @@ function renderWaveformTrack() {
       ctx.lineWidth = 1;
       ctx.strokeRect(startX, 0, zoneW, trackHeight);
 
-      // Label badge
-      ctx.fillStyle = "#FFF";
+      // Label badge — clipped to zone width so it never overflows into adjacent words
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(startX, 0, zoneW, trackHeight);
+      ctx.clip();
+
       ctx.font = "bold 10px JetBrains Mono, monospace";
-      ctx.fillText(f.word.toUpperCase(), startX + 3, 13);
+      const label = f.word.toUpperCase();
+      const textW = ctx.measureText(label).width;
+
+      // Only draw label pill if zone is wide enough to show at least 2 chars
+      if (zoneW >= 6) {
+        const pillW = Math.min(textW + 6, zoneW - 2);
+        const pillH = 14;
+        const pillX = startX + 1;
+        const pillY = 1;
+        const pillColor = isCustom ? "rgba(139,92,246,0.85)" : "rgba(225,29,72,0.85)";
+
+        ctx.fillStyle = pillColor;
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, pillW, pillH, 3);
+        ctx.fill();
+
+        ctx.fillStyle = "#FFF";
+        ctx.fillText(label, pillX + 3, pillY + 10);
+      }
+
+      ctx.restore();
     } else {
       // Disabled (gray)
       ctx.fillStyle = "rgba(100, 116, 139, 0.2)";
@@ -774,8 +798,10 @@ function handleMinimapClick(e: MouseEvent) {
 function renderRuler() {
   if (!currentMetadata) return;
 
-  const width = (rulerCanvas.width = rulerCanvas.offsetWidth);
-  const height = (rulerCanvas.height = rulerCanvas.offsetHeight);
+  // Use clientWidth (excludes borders/scrollbar) to match waveformViewport.clientWidth
+  // so ruler ticks align exactly with waveform canvas coordinates
+  const width = (rulerCanvas.width = rulerCanvas.clientWidth || rulerCanvas.offsetWidth);
+  const height = (rulerCanvas.height = rulerCanvas.clientHeight || rulerCanvas.offsetHeight);
   const ctx = rulerCanvas.getContext("2d");
   if (!ctx) return;
 
@@ -1108,7 +1134,7 @@ selectConfidentBtn.addEventListener("click", () => {
 async function previewRegion(start: number, end: number, btn?: HTMLButtonElement) {
   if (!currentMetadata) return;
 
-  pauseAudio();
+  await pauseAudio();
 
   const paddingMs = parseFloat((document.getElementById("paramPaddingBefore") as HTMLInputElement)?.value) || 30;
   const padSec = paddingMs / 1000.0;
