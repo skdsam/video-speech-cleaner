@@ -12,6 +12,8 @@ dist/
 dist-ssr/
 *.local
 .pnpm-debug.log*
+**/test-results/
+**/playwright-report/
 
 # Binaries & AI models (large files downloadable via setup script/readme)
 binaries/

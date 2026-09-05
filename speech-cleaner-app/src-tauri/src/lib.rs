@@ -32,7 +32,11 @@ pub struct WhisperToken {
     pub text: String,
     pub p: f64,
     pub offsets: WhisperTokenOffsets,
+    #[serde(default = "missing_alignment")]
+    pub t_dtw: i64,
 }
+
+fn missing_alignment() -> i64 { -1 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhisperSegmentOffsets {
@@ -63,6 +67,8 @@ pub struct FillerItem {
     pub enabled: bool,
     #[serde(default)]
     pub timing_estimated: bool,
+    #[serde(skip)]
+    pub(crate) alignment: Option<fillers::WordAlignment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +77,7 @@ pub struct AnalysisResult {
     pub fillers: Vec<FillerItem>,
     pub audio_preview_path: String,
     pub peaks: Vec<f32>,
+    pub peak_interval_seconds: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +358,10 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
         "-of", out_stem.to_str().unwrap(),
         "-pp",
         "-wt", "0.01",
+        // DTW aligns decoder tokens against audio attention. Flash attention
+        // must be disabled or this CLI silently leaves t_dtw at -1.
+        "-dtw", if model_path.file_name().and_then(|s| s.to_str()) == Some("ggml-small.en.bin") { "small.en" } else { "base.en" },
+        "-nfa",
         // A transcript-style example preserves disfluencies. A list of keywords
         // is not a verbatim transcript, and an initial-only prompt fades on long files.
         "--carry-initial-prompt",
@@ -480,45 +491,14 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
     let parsed: WhisperOutput = serde_json::from_str(&json_text)
         .map_err(|e| format!("Failed to parse whisper json: {}", e))?;
 
+    if parsed.transcription.iter().flat_map(|s| &s.tokens).any(|t| !t.text.starts_with("[_") && t.text.chars().any(char::is_alphabetic))
+        && !parsed.transcription.iter().flat_map(|s| &s.tokens).any(|t| t.t_dtw >= 0) {
+        return Err("Whisper did not return audio-aligned timestamps. Use a whisper-cli build supporting -dtw and -nfa.".into());
+    }
+
     let mut fillers = fillers::detect_fillers(&parsed, meta.duration);
-    fillers::refine_timestamps(&mut fillers, &temp_wav, meta.duration)?;
-
-    emit_prog(96.0, "Extracting audio waveform geometry...");
-
-    // Extract real peak envelope from preview_wav (downsampled to 2400 points for silky smooth rendering at all zoom levels)
-    let mut peaks: Vec<f32> = Vec::new();
-    if let Ok(mut reader) = hound::WavReader::open(&preview_wav) {
-        let spec = reader.spec();
-        let channels = spec.channels.max(1) as usize;
-        let total_samples = reader.len() as usize / channels;
-        let target_points = 2400;
-        let chunk_size = (total_samples / target_points).max(1);
-
-        let mut current_max: f32 = 0.0;
-        let mut sample_idx = 0;
-
-        for sample in reader.samples::<i16>() {
-            if let Ok(s) = sample {
-                let abs_val = (s as f32).abs() / 32768.0;
-                if abs_val > current_max {
-                    current_max = abs_val;
-                }
-                sample_idx += 1;
-                if sample_idx % (chunk_size * channels) == 0 {
-                    peaks.push((current_max * 1.25).min(1.0));
-                    current_max = 0.0;
-                }
-            }
-        }
-        if current_max > 0.0 && peaks.len() < target_points {
-            peaks.push((current_max * 1.25).min(1.0));
-        }
-    }
-
-    // Fallback if wav read was empty
-    if peaks.is_empty() {
-        peaks = vec![0.3; 200];
-    }
+    emit_prog(96.0, "Aligning filler boundaries and extracting detailed waveform...");
+    let peaks = fillers::refine_timestamps(&mut fillers, &temp_wav, meta.duration)?;
 
     emit_prog(100.0, "Analysis complete!");
 
@@ -527,6 +507,7 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
         fillers,
         audio_preview_path: preview_wav.to_string_lossy().to_string(),
         peaks,
+        peak_interval_seconds: 0.01,
     })
 }
 

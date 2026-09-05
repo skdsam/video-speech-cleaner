@@ -67,7 +67,18 @@ cargo test --test media_regression -- --ignored
 cargo run --release --example analyze -- "C:\path\to\video.mp4" result.json
 ```
 
-The JSON includes every filler candidate and its selected state. The recognizer uses examples of hesitant speech and carries that prompt throughout long recordings. Matching reassembles subword tokens, preserves repeated occurrences, and accepts elongated spellings such as `ummmm` and `errrr`. Timestamp refinement uses 10 ms audio frames, independently of the display waveform. Candidates with estimated timing remain unselected for manual review.
+The JSON includes every filler candidate and its selected state. The recognizer uses examples of hesitant speech and carries that prompt throughout long recordings. Matching reassembles subword tokens, preserves repeated occurrences, and accepts elongated spellings such as `ummmm` and `errrr`. Word locations use Whisper's DTW audio alignment (`-dtw` with `-nfa`), followed by 10 ms audio boundary refinement constrained by neighboring words. Candidates with uncertain boundaries remain unselected for manual review. Reanalyze a recording to regenerate markers after an alignment update.
+
+The waveform retains 10 ms detail and paints only the visible viewport, so long recordings can zoom down to individual words. Previewing a detection brings its waveform region into view. Clicking a waveform region highlights and reveals the corresponding list row; mute selection stays on the checkbox. Drag a selected region's edges to adjust it, or double-click it to preview. During playback the list follows the current detection.
+
+New analyses start unapplied. Use **Apply / Unapply** beside a preview, or **Apply All / Unapply All**, to hear the chosen mutes during full-file playback. Applied regions are yellow on the waveform and minimap; unapplied detections are red. The same applied state controls export. **Preview** auditions the original snippet for comparison. Playback mutes are scheduled on the Web Audio clock and update when you seek, resize, or change applied regions. Zoom is available immediately up to at least 100×, increasing with recording length to show about one second across the viewport.
+
+Browser interaction regressions run headlessly in the installed Microsoft Edge:
+
+```powershell
+cd speech-cleaner-app
+pnpm test:ui
+```
 
 Review detections before export: a higher detection count does not establish recall or precision, and Whisper can still omit or misrecognize sounds. The supplied ground-truth fixture can check the five known fillers in `Speech_Cleaner_Test.mp4`; the longer recording requires human annotations to measure recall.
 

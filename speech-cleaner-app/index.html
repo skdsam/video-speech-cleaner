@@ -8,7 +8,7 @@
   </head>
   <body>
     <!-- Hidden audio element — used for all audio playback (transport + preview) via Web Audio API -->
-    <audio id="previewAudioPlayer" preload="auto" style="display:none;"></audio>
+    <audio crossorigin="anonymous" id="previewAudioPlayer" preload="auto" style="display:none;"></audio>
 
     <!-- Top Workstation Header Bar -->
     <header class="app-header">
@@ -156,9 +156,9 @@
                 </svg>
                 Show Video
               </button>
-              <button id="selectAllBtn" class="btn btn-secondary btn-xs">All</button>
-              <button id="deselectAllBtn" class="btn btn-secondary btn-xs">None</button>
-              <button id="selectConfidentBtn" class="btn btn-secondary btn-xs">High Conf</button>
+              <button id="selectAllBtn" class="btn btn-secondary btn-xs">Apply All</button>
+              <button id="deselectAllBtn" class="btn btn-secondary btn-xs">Unapply All</button>
+              <button id="selectConfidentBtn" class="btn btn-secondary btn-xs">Apply Confident</button>
             </div>
           </div>
           <div id="detectionList" class="detection-list">
@@ -173,7 +173,7 @@
         <div class="track-toolbar">
           <div class="track-toolbar-left">
             <span class="track-title">Audio Track 1</span>
-            <span id="timelineHintText" class="timeline-hint">Scroll to Zoom • Drag region edges to resize</span>
+            <span id="timelineHintText" class="timeline-hint">Click a region to find it • Drag selected edges to resize</span>
 
             <!-- Dedicated Custom Mute Selection Toolbar Controls -->
             <div id="toolbarCustomMuteControls" class="toolbar-custom-controls" style="display: none;">
@@ -193,7 +193,7 @@
 
           <div class="zoom-controls">
             <button id="zoomOutBtn" class="btn btn-secondary btn-xs" title="Zoom Out (Ctrl -)">−</button>
-            <input id="zoomSlider" type="range" min="1" max="25" step="0.5" value="1" class="zoom-slider" title="Waveform Zoom Scale" />
+            <input id="zoomSlider" type="range" min="1" max="100" step="0.5" value="1" class="zoom-slider" title="Waveform Zoom Scale" />
             <button id="zoomInBtn" class="btn btn-secondary btn-xs" title="Zoom In (Ctrl +)">+</button>
             <button id="zoomFitBtn" class="btn btn-secondary btn-xs" title="Fit Entire Timeline (1x)">Fit</button>
             <span id="zoomLevelDisplay" class="zoom-label">1.0x</span>

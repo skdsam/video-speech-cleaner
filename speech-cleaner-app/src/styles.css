@@ -534,12 +534,46 @@ body {
 }
 
 .detection-item.disabled {
-  opacity: 0.38;
+  opacity: 0.85;
+}
+
+.detection-item.active {
+  border-color: var(--accent-cyan);
+  background: rgba(34, 211, 238, 0.1);
+  box-shadow: inset 3px 0 var(--accent-cyan);
+  opacity: 1;
+}
+
+.detection-item:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: -2px;
 }
 
 .detection-item.disabled .detection-timestamps {
-  text-decoration: line-through;
+  text-decoration: none;
 }
+
+.btn-apply {
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-main);
+  padding: 4px 8px;
+  min-width: 66px;
+  cursor: pointer;
+}
+
+.btn-apply.is-applied {
+  background: rgba(250, 204, 21, 0.16);
+  color: #FACC15;
+  border-color: #A16207;
+}
+
+.detection-item.applied:not(.active) {
+  border-color: #A16207;
+}
+
+.bulk-actions { flex-wrap: wrap; }
 
 .detection-left {
   display: flex;
@@ -801,6 +835,8 @@ body {
 }
 
 #waveformCanvas {
+  position: sticky;
+  left: 0;
   height: 100%;
   display: block;
 }

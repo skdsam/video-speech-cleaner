@@ -1,3 +1,4 @@
+import { PlaybackMutes, muteIntervals } from "./playback-mutes";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -30,6 +31,7 @@ interface AnalysisResult {
   fillers: FillerItem[];
   audio_preview_path: string;
   peaks: number[];
+  peak_interval_seconds?: number;
 }
 
 interface ProgressPayload {
@@ -40,12 +42,19 @@ interface ProgressPayload {
 let currentMetadata: MediaMetadata | null = null;
 let currentFillers: FillerItem[] = [];
 let audioPeaks: number[] = [];
+let peakIntervalSeconds = 0.01;
+let activeFillerId: string | null = null;
 let previewTimeoutId: number | null = null;
 let previewAnimationFrameId: number | null = null;
 let previewStopCleanup: (() => void) | null = null;
 
 // Primary audio element — drives all transport playback and region previews
 const previewAudioPlayer = document.getElementById("previewAudioPlayer") as HTMLAudioElement;
+const playbackMutes = new PlaybackMutes(previewAudioPlayer, () => muteIntervals(
+  currentFillers, Math.max(0, Number((document.getElementById("paramPaddingBefore") as HTMLInputElement).value) || 0) / 1000,
+  currentMetadata?.duration ?? 0,
+));
+(document.getElementById("paramPaddingBefore") as HTMLInputElement).addEventListener("input", () => playbackMutes.refresh());
 
 // DOM Elements: Import & Metadata
 const dropSection = document.getElementById("dropSection") as HTMLElement;
@@ -354,8 +363,10 @@ analyzeBtn.addEventListener("click", async () => {
     engineStatusLabel.innerText = "Whisper Analysing...";
 
     const result = await invoke<AnalysisResult>("analyze_audio", { path: currentMetadata.file_path });
-    currentFillers = result.fillers;
+    currentFillers = result.fillers.map(f => ({ ...f, enabled: false }));
     audioPeaks = result.peaks && result.peaks.length > 0 ? result.peaks : [];
+    peakIntervalSeconds = result.peak_interval_seconds ?? result.metadata.duration / Math.max(1, audioPeaks.length);
+    activeFillerId = null;
 
     // Wire preview audio to the full-quality WAV produced by the analysis
     previewAudioPlayer.src = convertFileSrc(result.audio_preview_path);
@@ -383,6 +394,7 @@ analyzeBtn.addEventListener("click", async () => {
 });
 
 function displayWorkstation() {
+  currentTime = 0;
   workspaceRow.style.display = "grid";
   reviewSection.style.display = "flex";
   waveformSection.style.display = "flex";
@@ -399,6 +411,7 @@ function displayWorkstation() {
   }
 
   zoomLevel = 1.0;
+  zoomSlider.max = Math.max(100, currentMetadata?.duration ?? 100).toString();
   zoomSlider.value = "1";
   zoomLevelDisplay.innerText = "1.0x";
 
@@ -433,8 +446,11 @@ async function playAudio(fromTime?: number) {
 
   previewAudioPlayer.currentTime = seekTime;
   try {
+    await playbackMutes.start();
     await previewAudioPlayer.play();
+    playbackMutes.refresh();
   } catch (err) {
+    playbackMutes.stop();
     console.error("Play audio failed:", err);
     return;
   }
@@ -450,6 +466,7 @@ async function playAudio(fromTime?: number) {
 }
 
 async function pauseAudio() {
+  playbackMutes.stop();
   // Cancel any active preview snippet
   if (previewStopCleanup) {
     previewStopCleanup();
@@ -492,7 +509,10 @@ function stopAudio() {
 function seekTo(timeInSeconds: number) {
   if (!currentMetadata) return;
   const clamped = Math.max(0, Math.min(currentMetadata.duration, timeInSeconds));
+  if (previewStopCleanup) previewStopCleanup();
   currentTime = clamped;
+  previewAudioPlayer.currentTime = clamped;
+  playbackMutes.refresh();
 
   // Keep video synchronized frame-by-frame if visible
   if (isVideoVisible && videoPreviewPlayer.src && !isNaN(videoPreviewPlayer.duration)) {
@@ -512,12 +532,12 @@ function updatePlayhead(timeInSeconds: number) {
   const ratio = Math.max(0, Math.min(1, timeInSeconds / duration));
 
   // Position on main zoomed waveform
-  const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
+  const totalTrackW = getTrackWidth();
   const px = ratio * totalTrackW;
   playheadLine.style.left = `${px}px`;
 
   // Auto-scroll waveform viewport during playback if zoomed in
-  if (isPlaying && zoomLevel > 1.0) {
+  if ((isPlaying || previewStopCleanup !== null) && zoomLevel > 1.0) {
     const viewW = waveformViewport.clientWidth;
     const scrollLeft = waveformViewport.scrollLeft;
     if (px > scrollLeft + viewW * 0.8 || px < scrollLeft) {
@@ -550,6 +570,7 @@ function startPlayheadLoop() {
     }
 
     currentTime = nowPos;
+    followDetectionAtTime(nowPos);
     updatePlayhead(nowPos);
     animationFrameId = requestAnimationFrame(loop);
   }
@@ -589,6 +610,7 @@ timelineScrubber.addEventListener("input", () => {
 
 // Global Keyboard Shortcuts (Space: Play/Pause or Preview selection, Enter: Apply Mute, Esc: Cancel)
 window.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented) return;
   const activeEl = document.activeElement as HTMLElement | null;
   const isInputActive = activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA");
 
@@ -617,8 +639,9 @@ window.addEventListener("keydown", (e) => {
 function setZoom(newZoom: number, anchorRatio: number = 0.5) {
   if (!currentMetadata) return;
   const viewportW = waveformViewport.clientWidth || 800;
-  // Chromium canvas dimension hard limit is 32767px. We clamp to a safe max of 28000px or 25x.
-  const maxSafeZoom = Math.min(25.0, Math.max(1.5, Math.floor(28000 / viewportW)));
+  // Only the viewport is painted, so long recordings can zoom to word scale.
+  const maxSafeZoom = Math.max(100, currentMetadata.duration);
+  zoomSlider.max = maxSafeZoom.toString();
   const clamped = Math.max(1.0, Math.min(maxSafeZoom, newZoom));
   const oldZoom = zoomLevel;
   zoomLevel = clamped;
@@ -638,6 +661,8 @@ function setZoom(newZoom: number, anchorRatio: number = 0.5) {
 
   const newTotalW = Math.round(viewportW * zoomLevel);
   waveformViewport.scrollLeft = Math.max(0, anchorTimeRatio * newTotalW - viewportW * anchorRatio);
+  renderWaveformTrack();
+  renderRuler();
 }
 
 zoomSlider.addEventListener("input", () => {
@@ -677,6 +702,7 @@ waveformViewport.addEventListener(
 );
 
 waveformViewport.addEventListener("scroll", () => {
+  renderWaveformTrack();
   updateMinimapViewport();
   renderRuler();
   updateSelectionUI();
@@ -692,68 +718,58 @@ function renderAllViews() {
   updateSelectionUI();
 }
 
+function getTrackWidth(): number {
+  return Math.max(1, Math.round((waveformViewport.clientWidth || 800) * zoomLevel));
+}
+
+function peakBetween(start: number, end: number): number {
+  const a = Math.max(0, Math.floor(start / peakIntervalSeconds));
+  const b = Math.min(audioPeaks.length, Math.max(a + 1, Math.ceil(end / peakIntervalSeconds)));
+  let peak = 0;
+  for (let i = a; i < b; i++) peak = Math.max(peak, audioPeaks[i]);
+  return peak;
+}
+
 function renderWaveformTrack() {
   if (!currentMetadata) return;
-
   const viewportW = waveformViewport.clientWidth || 800;
-  const totalTrackW = Math.min(28000, Math.max(viewportW, Math.round(viewportW * zoomLevel)));
+  const totalTrackW = getTrackWidth();
   const trackHeight = waveformCanvas.offsetHeight || 110;
-
-  waveformCanvas.width = totalTrackW;
-  waveformCanvas.height = trackHeight;
   waveformContainer.style.width = `${totalTrackW}px`;
-
+  waveformCanvas.width = viewportW;
+  waveformCanvas.height = trackHeight;
+  const scrollLeft = waveformViewport.scrollLeft;
   const ctx = waveformCanvas.getContext("2d");
   if (!ctx) return;
-
-  ctx.clearRect(0, 0, totalTrackW, trackHeight);
-
-  // 1. Draw True Waveform Peak Geometry
-  // Each peak maps directly to its time-proportional x position — same coordinate
-  // system as mute zones so labels always sit exactly over the right audio content.
+  ctx.clearRect(0, 0, viewportW, trackHeight);
   ctx.fillStyle = "#334155";
-
-  if (audioPeaks.length > 0) {
-    const barW = totalTrackW / audioPeaks.length;
-    for (let i = 0; i < audioPeaks.length; i++) {
-      const x = i * barW;
-      const amp = audioPeaks[i];
-      const barH = Math.max(3, amp * (trackHeight * 0.8));
-      const y = (trackHeight - barH) / 2;
-      ctx.fillRect(x, y, Math.max(1, barW - 0.5), barH);
-    }
-  } else {
-    // Placeholder sine wave when no real peaks available
-    const barW = Math.max(1, totalTrackW / 200);
-    for (let i = 0; i < 200; i++) {
-      const x = i * (totalTrackW / 200);
-      const amp = Math.sin((i / 200) * Math.PI * 4) * 0.3 + 0.5;
-      const barH = Math.max(3, amp * (trackHeight * 0.8));
-      const y = (trackHeight - barH) / 2;
-      ctx.fillRect(x, y, Math.max(1, barW - 0.5), barH);
-    }
+  const secondsPerPixel = currentMetadata.duration / totalTrackW;
+  for (let x = 0; x < viewportW; x++) {
+    const amp = peakBetween((scrollLeft + x) * secondsPerPixel, (scrollLeft + x + 1) * secondsPerPixel);
+    const barH = Math.max(1, Math.min(1, amp * 1.25) * trackHeight * 0.8);
+    ctx.fillRect(x, (trackHeight - barH) / 2, 1, barH);
   }
 
   // 2. Draw Active Mute Zones
   const duration = currentMetadata.duration;
 
   currentFillers.forEach((f) => {
-    const startX = (f.start / duration) * totalTrackW;
-    const endX = (f.end / duration) * totalTrackW;
+    const startX = (f.start / duration) * totalTrackW - scrollLeft;
+    const endX = (f.end / duration) * totalTrackW - scrollLeft;
     const zoneW = Math.max(endX - startX, 4);
-    const isCustom = f.id.startsWith("custom_");
+    if (startX > viewportW || startX + zoneW < 0) return;
 
     if (f.enabled) {
-      // Red muted zone (custom ones highlighted violet)
-      ctx.fillStyle = isCustom ? "rgba(139, 92, 246, 0.38)" : "rgba(225, 29, 72, 0.38)";
+      // Applied mutes are yellow; detected but unapplied regions remain red.
+      ctx.fillStyle = "rgba(250, 204, 21, 0.35)";
       ctx.fillRect(startX, 0, zoneW, trackHeight);
 
-      ctx.strokeStyle = isCustom ? "#8B5CF6" : "#E11D48";
+      ctx.strokeStyle = "#FACC15";
       ctx.lineWidth = 1;
       ctx.strokeRect(startX, 0, zoneW, trackHeight);
 
       // Draw subtle draggable edge grip handles on left and right borders
-      ctx.fillStyle = isCustom ? "#C4B5FD" : "#FDA4AF";
+      ctx.fillStyle = "#FDE68A";
       ctx.fillRect(startX, 0, 3, trackHeight);
       ctx.fillRect(startX + zoneW - 3, 0, 3, trackHeight);
 
@@ -773,7 +789,7 @@ function renderWaveformTrack() {
         const pillH = 14;
         const pillX = startX + 1;
         const pillY = 1;
-        const pillColor = isCustom ? "rgba(139,92,246,0.85)" : "rgba(225,29,72,0.85)";
+        const pillColor = "rgba(161, 98, 7, 0.95)";
 
         ctx.fillStyle = pillColor;
         ctx.beginPath();
@@ -786,11 +802,16 @@ function renderWaveformTrack() {
 
       ctx.restore();
     } else {
-      // Disabled (gray)
-      ctx.fillStyle = "rgba(100, 116, 139, 0.2)";
+      // Unapplied detection: audible until Apply is pressed.
+      ctx.fillStyle = "rgba(225, 29, 72, 0.2)";
       ctx.fillRect(startX, 0, zoneW, trackHeight);
-      ctx.strokeStyle = "rgba(100, 116, 139, 0.4)";
+      ctx.strokeStyle = "rgba(225, 29, 72, 0.7)";
       ctx.strokeRect(startX, 0, zoneW, trackHeight);
+    }
+    if (f.id === activeFillerId) {
+      ctx.strokeStyle = "#22D3EE";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(startX, 1, zoneW, trackHeight - 2);
     }
   });
 
@@ -817,11 +838,7 @@ function renderMinimap() {
 
   for (let i = 0; i < bars; i++) {
     const progress = i / bars;
-    let amp = 0.3;
-    if (audioPeaks.length > 0) {
-      const idx = Math.min(audioPeaks.length - 1, Math.floor(progress * audioPeaks.length));
-      amp = audioPeaks[idx];
-    }
+    const amp = peakBetween(progress * currentMetadata.duration, ((i + 1) / bars) * currentMetadata.duration);
     const h = Math.max(2, amp * (height * 0.85));
     const y = (height - h) / 2;
     ctx.fillRect(i * barW, y, barW - 0.5, h);
@@ -830,10 +847,9 @@ function renderMinimap() {
   // Draw mute regions on minimap
   const duration = currentMetadata.duration;
   currentFillers.forEach((f) => {
-    if (!f.enabled) return;
     const startX = (f.start / duration) * width;
     const endX = (f.end / duration) * width;
-    ctx.fillStyle = f.id.startsWith("custom_") ? "rgba(139, 92, 246, 0.8)" : "rgba(225, 29, 72, 0.8)";
+    ctx.fillStyle = f.enabled ? "#FACC15" : "rgba(225, 29, 72, 0.8)";
     ctx.fillRect(startX, 0, Math.max(endX - startX, 2), height);
   });
 
@@ -843,7 +859,7 @@ function renderMinimap() {
 function updateMinimapViewport() {
   if (!currentMetadata) return;
   const viewportW = waveformViewport.clientWidth;
-  const totalTrackW = waveformCanvas.width || viewportW;
+  const totalTrackW = getTrackWidth();
   const scrollLeft = waveformViewport.scrollLeft;
 
   const leftRatio = scrollLeft / totalTrackW;
@@ -874,6 +890,7 @@ window.addEventListener("mousemove", (e) => {
         } else {
           filler.end = Math.min(currentMetadata.duration, Math.max(t, filler.start + 0.05));
         }
+        filler.timing_estimated = false;
         timelineHoverTooltip.innerText = `${resizingRegion.edge.toUpperCase()}: ${formatTimecode(resizingRegion.edge === "start" ? filler.start : filler.end)}`;
         renderWaveformTrack();
         renderMinimap();
@@ -906,7 +923,7 @@ window.addEventListener("mouseup", () => {
 function handleMinimapClick(e: MouseEvent) {
   const rect = minimapContainer.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  const totalTrackW = waveformCanvas.width;
+  const totalTrackW = getTrackWidth();
   const viewportW = waveformViewport.clientWidth;
 
   waveformViewport.scrollLeft = ratio * totalTrackW - viewportW / 2;
@@ -930,7 +947,7 @@ function renderRuler() {
 
   const duration = currentMetadata.duration;
   const viewportW = waveformViewport.clientWidth;
-  const totalTrackW = waveformCanvas.width || viewportW;
+  const totalTrackW = getTrackWidth();
   const scrollLeft = waveformViewport.scrollLeft;
 
   const visibleStartSec = (scrollLeft / totalTrackW) * duration;
@@ -979,13 +996,13 @@ function getTimestampFromClientX(clientX: number): number {
 }
 
 // Helper: find if mouse is near the left or right edge of an existing mute region
-function findRegionEdgeNearX(clickTime: number, totalTrackW: number, tolerancePx: number = 8): { filler: FillerItem; edge: "start" | "end" } | null {
+function findRegionEdgeNearX(clickTime: number, totalTrackW: number, tolerancePx: number = 5): { filler: FillerItem; edge: "start" | "end" } | null {
   if (!currentMetadata) return null;
   const duration = currentMetadata.duration;
   const toleranceSec = (tolerancePx / totalTrackW) * duration;
 
   for (const f of currentFillers) {
-    if (!f.enabled) continue;
+    if (f.id !== activeFillerId || (f.end - f.start) / duration * totalTrackW < 18) continue;
     if (Math.abs(clickTime - f.start) <= toleranceSec) {
       return { filler: f, edge: "start" };
     }
@@ -1001,7 +1018,7 @@ waveformContainer.addEventListener("mousemove", (e) => {
   const t = getTimestampFromClientX(e.clientX);
   const rect = waveformContainer.getBoundingClientRect();
   const relX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-  const totalTrackW = waveformCanvas.width || rect.width;
+  const totalTrackW = getTrackWidth();
 
   timelineHoverTooltip.style.display = "block";
   timelineHoverTooltip.style.left = `${relX}px`;
@@ -1015,6 +1032,7 @@ waveformContainer.addEventListener("mousemove", (e) => {
       } else {
         filler.end = Math.min(currentMetadata.duration, Math.max(t, filler.start + 0.05));
       }
+      filler.timing_estimated = false;
       timelineHoverTooltip.innerText = `${resizingRegion.edge.toUpperCase()}: ${formatTimecode(resizingRegion.edge === "start" ? filler.start : filler.end)}`;
       renderWaveformTrack();
       renderMinimap();
@@ -1098,8 +1116,7 @@ waveformContainer.addEventListener("mouseleave", () => {
 waveformContainer.addEventListener("mousedown", (e) => {
   if (!currentMetadata) return;
   const clickTime = getTimestampFromClientX(e.clientX);
-  const rect = waveformContainer.getBoundingClientRect();
-  const totalTrackW = waveformCanvas.width || rect.width;
+  const totalTrackW = getTrackWidth();
 
   // If user is already dragging selection handles, let it proceed
   if (resizingSelectionEdge) return;
@@ -1160,30 +1177,24 @@ waveformContainer.addEventListener("mousedown", (e) => {
     return;
   }
 
-  // 1. Check if user clicked on an edge handle of an existing mute region
-  const edgeHit = findRegionEdgeNearX(clickTime, totalTrackW);
-  if (edgeHit && e.button === 0) {
-    resizingRegion = { fillerId: edgeHit.filler.id, edge: edgeHit.edge };
-    return;
-  }
-
-  // 2. Check if clicked on a filler body to toggle/delete
-  const hitIndex = currentFillers.findIndex((f) => clickTime >= f.start && clickTime <= f.end);
-  if (e.button === 2 || e.shiftKey) {
-    if (hitIndex !== -1) {
-      currentFillers.splice(hitIndex, 1);
-      renderFillersList();
-      updateSummary();
-      renderAllViews();
-      return;
-    }
-  }
-
-  if (hitIndex !== -1) {
-    currentFillers[hitIndex].enabled = !currentFillers[hitIndex].enabled;
+  const hit = findRegionAtTime(clickTime);
+  if ((e.button === 2 || e.shiftKey) && hit) {
+    currentFillers = currentFillers.filter(f => f.id !== hit.id);
     renderFillersList();
     updateSummary();
     renderAllViews();
+    return;
+  }
+  if (e.button !== 0) return;
+  const edgeHit = findRegionEdgeNearX(clickTime, totalTrackW);
+  if (edgeHit) {
+    selectFiller(edgeHit.filler.id, false);
+    resizingRegion = { fillerId: edgeHit.filler.id, edge: edgeHit.edge };
+    return;
+  }
+  if (hit) {
+    selectFiller(hit.id);
+    seekTo(hit.start);
     return;
   }
 
@@ -1235,7 +1246,7 @@ function updateSelectionUI() {
   }
 
   const duration = currentMetadata.duration;
-  const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
+  const totalTrackW = getTrackWidth();
   const s = Math.max(0, Math.min(selectionStartTime, selectionEndTime));
   const e = Math.min(duration, Math.max(selectionStartTime, selectionEndTime));
 
@@ -1253,7 +1264,7 @@ function updateSelectionUI() {
 function showSelectionActionBar() {
   if (!currentMetadata || selectionStartTime === null || selectionEndTime === null) return;
   const duration = currentMetadata.duration;
-  const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
+  const totalTrackW = getTrackWidth();
   const s = Math.max(0, Math.min(selectionStartTime, selectionEndTime));
   const e = Math.min(duration, Math.max(selectionStartTime, selectionEndTime));
   const selDur = e - s;
@@ -1422,17 +1433,10 @@ openAddCustomModalBtn.addEventListener("click", () => {
 
 waveformContainer.addEventListener("contextmenu", (e) => e.preventDefault());
 
-// Double click to remove region
-waveformContainer.addEventListener("dblclick", (e) => {
-  if (!currentMetadata) return;
-  const clickTime = getTimestampFromClientX(e.clientX);
-  const hitIndex = currentFillers.findIndex((f) => clickTime >= f.start && clickTime <= f.end);
-  if (hitIndex !== -1) {
-    currentFillers.splice(hitIndex, 1);
-    renderFillersList();
-    updateSummary();
-    renderAllViews();
-  }
+// Double click previews the selected region; deletion stays on explicit controls.
+waveformContainer.addEventListener("dblclick", () => {
+  const item = currentFillers.find(f => f.id === activeFillerId);
+  if (item && !isCustomMuteMode) previewRegion(item.start, item.end);
 });
 
 // -------------------------------------------------------------
@@ -1482,13 +1486,67 @@ btnConfirmAddCustom.addEventListener("click", () => {
 // -------------------------------------------------------------
 // Detection List View & Bulk Actions
 // -------------------------------------------------------------
+function findRegionAtTime(time: number): FillerItem | undefined {
+  if (!currentMetadata) return;
+  const pixelsPerSecond = getTrackWidth() / currentMetadata.duration;
+  const x = Math.round(time * pixelsPerSecond);
+  // MouseEvent coordinates are rounded to pixels. Include every painted pixel
+  // of the minimum-width overview marker, even if the word spans a fraction.
+  return currentFillers.filter(f => x >= Math.floor(f.start * pixelsPerSecond)
+      && x <= Math.ceil(Math.max(f.end * pixelsPerSecond, f.start * pixelsPerSecond + 4)))
+    .sort((a, b) => Math.abs(time - (a.start + a.end) / 2) - Math.abs(time - (b.start + b.end) / 2))[0];
+}
+
+function revealTimeline(start: number, end: number) {
+  if (!currentMetadata) return;
+  // Show enough context to hear and edit a word, retaining a closer user zoom.
+  const visibleSeconds = Math.max(8, end - start + 4);
+  if (currentMetadata.duration / zoomLevel > visibleSeconds) {
+    setZoom(currentMetadata.duration / visibleSeconds);
+  }
+  const centerPx = ((start + end) / 2) / currentMetadata.duration * getTrackWidth();
+  waveformViewport.scrollLeft = Math.max(0, centerPx - waveformViewport.clientWidth / 2);
+  renderWaveformTrack();
+  renderRuler();
+}
+
+function selectFiller(id: string, revealWaveform = true, scrollList = true) {
+  const item = currentFillers.find(f => f.id === id);
+  if (!item) return;
+  activeFillerId = id;
+  for (const row of detectionList.querySelectorAll<HTMLElement>(".detection-item")) {
+    const active = row.dataset.fillerId === id;
+    row.classList.toggle("active", active);
+    if (active) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+    if (active && scrollList) {
+      const r = row.getBoundingClientRect();
+      const list = detectionList.getBoundingClientRect();
+      if (r.top < list.top || r.bottom > list.bottom) {
+        detectionList.scrollTop += r.top - list.top - (detectionList.clientHeight - r.height) / 2;
+      }
+    }
+  }
+  if (revealWaveform) revealTimeline(item.start, item.end);
+  else renderWaveformTrack();
+}
+
+function followDetectionAtTime(time: number) {
+  const item = currentFillers.find(f => time >= f.start && time <= f.end);
+  if (item && item.id !== activeFillerId) selectFiller(item.id, false);
+}
+
 function renderFillersList() {
+  const listScrollTop = detectionList.scrollTop;
   detectionList.innerHTML = "";
   regionsCountBadge.innerText = currentFillers.length.toString();
 
   currentFillers.forEach((item, index) => {
     const el = document.createElement("div");
-    el.className = `detection-item ${item.enabled ? "" : "disabled"}`;
+    el.className = `detection-item ${item.enabled ? "applied" : "disabled"} ${item.id === activeFillerId ? "active" : ""}`;
+    el.dataset.fillerId = item.id;
+    el.tabIndex = 0;
+    if (item.id === activeFillerId) el.setAttribute("aria-current", "true");
 
     const dur = Math.max(0.01, item.end - item.start);
     const confPct = Math.round(item.confidence * 100);
@@ -1497,7 +1555,7 @@ function renderFillersList() {
     el.innerHTML = `
       <div class="detection-left">
         <label class="checkbox-container">
-          <input type="checkbox" ${item.enabled ? "checked" : ""} data-id="${item.id}" />
+          <input type="checkbox" aria-label="Apply mute" ${item.enabled ? "checked" : ""} data-id="${item.id}" />
           <span class="checkmark"></span>
         </label>
         <span class="filler-badge ${isCustom ? "custom-badge" : ""}">${item.word}</span>
@@ -1508,10 +1566,11 @@ function renderFillersList() {
       </div>
       <div class="detection-right">
         <span class="confidence-indicator">${isCustom ? "Manual" : item.timing_estimated ? "Review timing" : `${confPct}%`}</span>
-        <button class="btn-preview" data-start="${item.start}" data-end="${item.end}">
+        <button class="btn-preview" title="Preview original audio" data-start="${item.start}" data-end="${item.end}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           Preview
         </button>
+        <button class="btn-apply ${item.enabled ? "is-applied" : ""}" aria-pressed="${item.enabled}">${item.enabled ? "Unapply" : "Apply"}</button>
         <button class="btn-delete-item" title="Remove mute area">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"></polyline>
@@ -1524,7 +1583,24 @@ function renderFillersList() {
     const cb = el.querySelector("input[type='checkbox']") as HTMLInputElement;
     cb.addEventListener("change", () => {
       item.enabled = cb.checked;
-      el.className = `detection-item ${item.enabled ? "" : "disabled"}`;
+      syncAppliedRow();
+      updateSummary();
+      renderAllViews();
+    });
+
+    const applyBtn = el.querySelector(".btn-apply") as HTMLButtonElement;
+    function syncAppliedRow() {
+      el.classList.toggle("disabled", !item.enabled);
+      el.classList.toggle("applied", item.enabled);
+      cb.checked = item.enabled;
+      applyBtn.textContent = item.enabled ? "Unapply" : "Apply";
+      applyBtn.classList.toggle("is-applied", item.enabled);
+      applyBtn.setAttribute("aria-pressed", String(item.enabled));
+    }
+    applyBtn.addEventListener("click", e => {
+      e.stopPropagation();
+      item.enabled = !item.enabled;
+      syncAppliedRow();
       updateSummary();
       renderAllViews();
     });
@@ -1532,6 +1608,7 @@ function renderFillersList() {
     const prevBtn = el.querySelector(".btn-preview") as HTMLButtonElement;
     prevBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      selectFiller(item.id);
       previewRegion(item.start, item.end, prevBtn);
     });
 
@@ -1544,25 +1621,25 @@ function renderFillersList() {
       renderAllViews();
     });
 
-    // Clicking anywhere on the item row navigates the timeline playhead & video straight to the exact detected region
     el.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).tagName === "INPUT" || (e.target as HTMLElement).closest("button")) {
-        return;
-      }
+      if ((e.target as HTMLElement).closest("button, input, label")) return;
+      selectFiller(item.id);
       seekTo(item.start);
-      // Ensure the region is scrolled into view if zoomed in
-      if (zoomLevel > 1.0 && currentMetadata) {
-        const totalTrackW = waveformCanvas.width || waveformViewport.clientWidth;
-        const targetPx = (item.start / currentMetadata.duration) * totalTrackW;
-        waveformViewport.scrollLeft = Math.max(0, targetPx - waveformViewport.clientWidth / 2);
-      }
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.target !== el || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      selectFiller(item.id);
+      seekTo(item.start);
     });
 
     detectionList.appendChild(el);
   });
+  detectionList.scrollTop = listScrollTop;
 }
 
 function updateSummary() {
+  playbackMutes.refresh();
   const activeCount = currentFillers.filter((f) => f.enabled).length;
   summaryMuteCount.innerText = activeCount.toString();
 }
@@ -1611,6 +1688,7 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
   }
 
   previewAudioPlayer.pause();
+  videoPreviewPlayer.pause();
   if (isPlaying) {
     isPlaying = false;
     if (animationFrameId !== null) {
@@ -1628,6 +1706,10 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
   // Guarantee preview plays at least through the entire selected end plus 80ms so the last syllable isn't cut off
   const playEnd = Math.min(currentMetadata.duration, end + Math.max(0.08, padSec));
 
+  const matchingItem = currentFillers.find(f => f.start === start && f.end === end);
+  if (matchingItem) selectFiller(matchingItem.id);
+  else revealTimeline(start, end);
+
   // Move visual playhead to preview start
   updatePlayhead(playStart);
   currentTime = playStart;
@@ -1642,6 +1724,7 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
 
   const stopPreview = () => {
     previewAudioPlayer.pause();
+    playbackMutes.stop();
     if (previewAnimationFrameId !== null) {
       cancelAnimationFrame(previewAnimationFrameId);
       previewAnimationFrameId = null;
@@ -1665,6 +1748,7 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
 
   const onTimeUpdate = () => {
     const pos = previewAudioPlayer.currentTime;
+    if (isVideoVisible && videoPreviewPlayer.src) videoPreviewPlayer.currentTime = pos;
     if (pos >= playEnd || previewAudioPlayer.ended) {
       stopPreview();
     } else {
@@ -1676,11 +1760,13 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
   const previewFrameLoop = () => {
     if (!previewStopCleanup) return;
     const pos = previewAudioPlayer.currentTime;
+    if (isVideoVisible && videoPreviewPlayer.src) videoPreviewPlayer.currentTime = pos;
     if (pos >= playEnd || previewAudioPlayer.ended) {
       stopPreview();
       return;
     }
     currentTime = pos;
+    followDetectionAtTime(pos);
     updatePlayhead(pos);
     previewAnimationFrameId = requestAnimationFrame(previewFrameLoop);
   };
@@ -1691,13 +1777,17 @@ async function previewRegion(start: number, end: number, btn?: HTMLButtonElement
   // Seek and play
   previewAudioPlayer.currentTime = playStart;
   try {
+    await playbackMutes.start(true);
+    if (previewStopCleanup !== stopPreview) return;
     await previewAudioPlayer.play();
+    if (previewStopCleanup !== stopPreview) return;
     previewAnimationFrameId = requestAnimationFrame(previewFrameLoop);
     // Safety fallback timeout in case timeupdate is delayed by OS
     const maxSafetyDuration = Math.max(1.0, (playEnd - playStart) * 1.5 + 2.0);
     previewTimeoutId = window.setTimeout(stopPreview, maxSafetyDuration * 1000);
   } catch (err) {
     console.error("Preview audio error:", err);
+    if (previewStopCleanup !== stopPreview) return;
     stopPreview();
   }
 }
@@ -1734,7 +1824,7 @@ exportBtn.addEventListener("click", async () => {
     exportBtn.disabled = true;
     exportBtn.innerText = "Exporting Cleaned Video...";
 
-    const paddingMs = parseFloat((document.getElementById("paramPaddingBefore") as HTMLInputElement).value) || 30;
+    const paddingMs = Math.max(0, Number((document.getElementById("paramPaddingBefore") as HTMLInputElement).value) || 0);
     const fadeMs = parseFloat((document.getElementById("paramFade") as HTMLInputElement).value) || 8;
 
     const res = await invoke<string>("export_video", {
