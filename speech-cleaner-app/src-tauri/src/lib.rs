@@ -317,7 +317,15 @@ fn cancel_analysis() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
+async fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
+    // Delegate all blocking work to a dedicated OS thread so the main UI thread
+    // (WebView2 message loop) stays free to deliver progress events to the frontend.
+    tauri::async_runtime::spawn_blocking(move || analyze_audio_inner(app, path))
+        .await
+        .map_err(|e| format!("Async task error: {}", e))?
+}
+
+fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
     use tauri::Emitter;
     use std::io::{BufRead, BufReader};
 
@@ -407,8 +415,8 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
     // Determine thread count (default to 8 for fast desktop inference)
     let threads_str = "8";
 
-    // Run Whisper with prompt biasing for maximum recall of hesitation filler words,
-    // plus -pp (print-progress) to capture real-time transcription percentages.
+    // Run Whisper with -pp (print-progress) so we can stream % to the UI,
+    // and -wt 0.01 to enable word-level timestamps inside each segment JSON.
     let mut whisper_cmd = Command::new(&whisper_bin);
     whisper_cmd.args([
         "-m", model_path.to_str().unwrap(),
@@ -417,6 +425,7 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
         "-ojf",
         "-of", out_stem.to_str().unwrap(),
         "-pp",
+        "-wt", "0.01",
         "--prompt", "Um, uh, erm, ah, er, hesitation, filler words, stuttering, pause.",
     ]);
     whisper_cmd.stdout(std::process::Stdio::piped());
@@ -433,40 +442,97 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
     if let Some(stdout) = whisper_child.stdout.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for _ in reader.lines() {
-                // discard or log transcript preview
-            }
+            for _ in reader.lines() {}
         });
     }
 
-    // Read stderr line by line for -pp progress
+    // Read stderr line by line for -pp progress.
+    // We use a channel so the main thread can pump events while also waiting
+    // for the child process — avoiding the deadlock where wait() blocks before
+    // the stderr reader thread even starts.
+    let (prog_tx, prog_rx) = std::sync::mpsc::channel::<(f64, String)>();
+
     if let Some(stderr) = whisper_child.stderr.take() {
-        let app_handle = app.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line_res in reader.lines() {
                 if let Ok(line) = line_res {
-                    // Lines like: "whisper_print_progress_callback: progress =  49%"
-                    if line.contains("progress =") {
-                        if let Some(pct_str) = line.split("progress =").nth(1) {
-                            let clean_pct: String = pct_str.chars().filter(|c| c.is_digit(10)).collect();
-                            if let Ok(num) = clean_pct.parse::<f64>() {
-                                // Map 0..100% of whisper to 20%..90% of overall progress
+                    // whisper-cli prints: "whisper_print_progress_callback: progress = 49%"
+                    // but some builds print: "progress = 49 %" — handle both
+                    if line.contains("progress") && line.contains('=') {
+                        if let Some(after_eq) = line.split('=').nth(1) {
+                            let clean: String = after_eq.chars()
+                                .take_while(|c| c.is_ascii_digit() || *c == ' ' || *c == '\t')
+                                .filter(|c| c.is_ascii_digit())
+                                .collect();
+                            if let Ok(num) = clean.parse::<f64>() {
+                                // Map whisper 0..100 → overall 20..90
                                 let overall = 20.0 + (num / 100.0) * 70.0;
-                                let _ = app_handle.emit("analysis-progress", ProgressPayload {
-                                    percent: overall.min(90.0),
-                                    stage: format!("AI Speech Analysis ({:.0}%)...", num),
-                                });
+                                let stage = format!("AI Speech Analysis ({:.0}%)...", num);
+                                let _ = prog_tx.send((overall.min(90.0), stage));
                             }
                         }
                     }
                 }
             }
+            // Channel drops here, receiver will see disconnected
         });
     }
 
-    let whisper_res = whisper_child.wait()
-        .map_err(|e| format!("Failed waiting for whisper: {}", e))?;
+    // Spawn a thread to wait for whisper and signal via a second channel
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<std::process::ExitStatus, String>>();
+    let whisper_child = {
+        // Move whisper_child into a Mutex so we can hand it to the wait thread
+        let wc = std::sync::Mutex::new(Some(whisper_child));
+        wc
+    };
+    let child_opt = whisper_child.lock().unwrap().take().unwrap();
+    std::thread::spawn(move || {
+        let res = child_opt.wait_with_output()
+            .map(|o| o.status)
+            .map_err(|e| e.to_string());
+        let _ = done_tx.send(res);
+    });
+
+    // Drain progress events until the whisper process exits
+    let whisper_exit_status: Result<std::process::ExitStatus, String>;
+    loop {
+        // Forward any queued progress events to the UI
+        while let Ok((pct, stage)) = prog_rx.try_recv() {
+            let _ = app.emit("analysis-progress", ProgressPayload {
+                percent: pct,
+                stage,
+            });
+        }
+
+        // Check if whisper finished
+        match done_rx.try_recv() {
+            Ok(status) => {
+                whisper_exit_status = status;
+                // Drain any remaining progress events
+                while let Ok((pct, stage)) = prog_rx.try_recv() {
+                    let _ = app.emit("analysis-progress", ProgressPayload {
+                        percent: pct,
+                        stage,
+                    });
+                }
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Still running — sleep briefly then loop
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                whisper_exit_status = Err("Whisper thread disconnected unexpectedly".into());
+                break;
+            }
+        }
+
+        // Honour cancellation during the wait loop
+        if *CANCEL_REQUESTED.lock().unwrap() {
+            return Err("Analysis cancelled by user".into());
+        }
+    }
 
     if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
         *pid_guard = None;
@@ -476,7 +542,10 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
         return Err("Analysis cancelled by user".into());
     }
 
-    if !whisper_res.success() {
+    let exit_ok = whisper_exit_status
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !exit_ok {
         return Err("Whisper speech model encountered an error during inference.".into());
     }
 
@@ -493,58 +562,96 @@ fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, 
     let filler_targets = [
         "um", "umm", "uh", "uhh", "erm", "err", "er", "ah", "ahh", "hmm", "hm"
     ];
-    let mut fillers = Vec::new();
-    let mut id_counter = 1;
+    let mut fillers: Vec<FillerItem> = Vec::new();
+    let mut id_counter = 1u32;
 
     for seg in &parsed.transcription {
-        let seg_trimmed = seg.text.trim().to_lowercase();
-        let seg_cleaned: String = seg_trimmed.chars().filter(|c| c.is_alphabetic()).collect();
+        let seg_start  = seg.offsets.from as f64 / 1000.0;
+        let seg_end    = seg.offsets.to   as f64 / 1000.0;
+        let seg_dur    = (seg_end - seg_start).max(0.0);
+        let mut found_in_tokens = false;
 
-        if filler_targets.contains(&seg_cleaned.as_str()) {
-            let start = seg.offsets.from as f64 / 1000.0;
-            let end = seg.offsets.to as f64 / 1000.0;
-            let valid_tokens: Vec<_> = seg.tokens.iter().filter(|t| !t.text.starts_with("[_")).collect();
-            let avg_p = if !valid_tokens.is_empty() {
-                valid_tokens.iter().map(|t| t.p).sum::<f64>() / valid_tokens.len() as f64
+        // ── Layer 1: per-token scan (most precise — uses -wt word timestamps) ──
+        for tok in &seg.tokens {
+            if tok.text.starts_with("[_") { continue; }
+            let tok_clean: String = tok.text
+                .trim().to_lowercase()
+                .chars().filter(|c| c.is_alphabetic()).collect();
+            if !filler_targets.contains(&tok_clean.as_str()) { continue; }
+
+            let t_start = tok.offsets.from as f64 / 1000.0;
+            let mut t_end = tok.offsets.to as f64 / 1000.0;
+            // Use segment start as anchor when token has no real timing
+            let (start, end) = if t_start < 0.01 && t_end < 0.01 {
+                (seg_start, (seg_start + 0.4).min(seg_end.max(seg_start + 0.1)))
             } else {
-                0.85
+                if (t_end - t_start).abs() < 0.01 { t_end = t_start + 0.35; }
+                (t_start, t_end)
             };
 
             fillers.push(FillerItem {
                 id: format!("filler_{}", id_counter),
-                word: seg_cleaned,
+                word: tok_clean,
                 start,
                 end,
+                confidence: tok.p,
+                enabled: true,
+            });
+            id_counter += 1;
+            found_in_tokens = true;
+        }
+
+        if found_in_tokens { continue; }
+
+        // ── Layer 2: word-by-word text scan (catches fillers in multi-word
+        //    segments when token data has no per-word timestamps) ──────────────
+        let words: Vec<&str> = seg.text.split_whitespace().collect();
+        let word_count = words.len() as f64;
+        let mut found_in_words = false;
+
+        for (i, word) in words.iter().enumerate() {
+            let w_clean: String = word.to_lowercase()
+                .chars().filter(|c| c.is_alphabetic()).collect();
+            if !filler_targets.contains(&w_clean.as_str()) { continue; }
+
+            // Distribute timing proportionally across the segment
+            let frac  = i as f64 / word_count.max(1.0);
+            let start = seg_start + frac * seg_dur;
+            let end   = (start + 0.4).min(seg_end.max(start + 0.05));
+
+            fillers.push(FillerItem {
+                id: format!("filler_{}", id_counter),
+                word: w_clean,
+                start,
+                end,
+                // Lower confidence because timing is estimated not measured
+                confidence: 0.72,
+                enabled: true,
+            });
+            id_counter += 1;
+            found_in_words = true;
+        }
+
+        if found_in_words { continue; }
+
+        // ── Layer 3: whole-segment match (segment text IS the filler word) ────
+        let seg_clean: String = seg.text.trim().to_lowercase()
+            .chars().filter(|c| c.is_alphabetic()).collect();
+        if filler_targets.contains(&seg_clean.as_str()) {
+            let valid: Vec<_> = seg.tokens.iter()
+                .filter(|t| !t.text.starts_with("[_")).collect();
+            let avg_p = if !valid.is_empty() {
+                valid.iter().map(|t| t.p).sum::<f64>() / valid.len() as f64
+            } else { 0.85 };
+            fillers.push(FillerItem {
+                id: format!("filler_{}", id_counter),
+                word: seg_clean,
+                start: seg_start,
+                end: seg_end,
                 confidence: avg_p,
                 enabled: true,
             });
             id_counter += 1;
-            continue;
-        }
-
-        // Check tokens inside longer segment
-        for tok in &seg.tokens {
-            if tok.text.starts_with("[_") {
-                continue;
-            }
-            let tok_clean: String = tok.text.trim().to_lowercase().chars().filter(|c| c.is_alphabetic()).collect();
-            if filler_targets.contains(&tok_clean.as_str()) {
-                let mut start = tok.offsets.from as f64 / 1000.0;
-                let mut end = tok.offsets.to as f64 / 1000.0;
-                // If Whisper gave a zero-length timestamp for this token, expand it slightly using segment context
-                if (end - start).abs() < 0.01 {
-                    end = start + 0.35;
-                }
-                fillers.push(FillerItem {
-                    id: format!("filler_{}", id_counter),
-                    word: tok_clean,
-                    start,
-                    end,
-                    confidence: tok.p,
-                    enabled: true,
-                });
-                id_counter += 1;
-            }
         }
     }
 
