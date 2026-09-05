@@ -22,6 +22,7 @@ interface FillerItem {
   end: number;
   confidence: number;
   enabled: boolean;
+  timing_estimated?: boolean;
 }
 
 interface AnalysisResult {
@@ -1506,7 +1507,7 @@ function renderFillersList() {
         <span class="detection-duration">(${dur.toFixed(2)}s)</span>
       </div>
       <div class="detection-right">
-        <span class="confidence-indicator">${isCustom ? "Manual" : `${confPct}%`}</span>
+        <span class="confidence-indicator">${isCustom ? "Manual" : item.timing_estimated ? "Review timing" : `${confPct}%`}</span>
         <button class="btn-preview" data-start="${item.start}" data-end="${item.end}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           Preview
@@ -1582,7 +1583,7 @@ deselectAllBtn.addEventListener("click", () => {
 
 selectConfidentBtn.addEventListener("click", () => {
   currentFillers.forEach((f) => {
-    f.enabled = f.confidence >= 0.75;
+    f.enabled = !f.timing_estimated && f.confidence >= 0.75;
   });
   renderFillersList();
   updateSummary();

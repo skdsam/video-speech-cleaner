@@ -1,3 +1,5 @@
+mod fillers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -59,6 +61,8 @@ pub struct FillerItem {
     pub end: f64,
     pub confidence: f64,
     pub enabled: bool,
+    #[serde(default)]
+    pub timing_estimated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,93 +81,6 @@ pub struct ExportRequest {
     pub padding_ms: f64,
     pub fade_ms: f64,
 }
-// ---------------------------------------------------------------------------
-// Silence detection from peaks — used to correct Whisper token timestamps
-// ---------------------------------------------------------------------------
-
-/// Detect silence periods from the peaks amplitude array.
-/// `min_silence_sec` = shortest gap that counts as silence (seconds).
-/// Returns a list of (start_sec, end_sec) pairs.
-fn find_silence_from_peaks(peaks: &[f32], duration: f64, min_silence_sec: f64) -> Vec<(f64, f64)> {
-    if peaks.is_empty() || duration <= 0.0 {
-        return Vec::new();
-    }
-    let n = peaks.len() as f64;
-    let peak_max = peaks.iter().cloned().fold(0.0_f32, f32::max);
-    // 6% of max or a hard floor of 0.5% — catches genuine pauses without
-    // triggering on inter-phoneme micro-gaps.
-    let threshold = (peak_max * 0.06).max(0.005);
-    let min_pts = ((min_silence_sec * n / duration) as usize).max(1);
-
-    let mut periods: Vec<(f64, f64)> = Vec::new();
-    let mut sil_start: Option<usize> = None;
-
-    for (i, &pk) in peaks.iter().enumerate() {
-        if pk < threshold {
-            if sil_start.is_none() {
-                sil_start = Some(i);
-            }
-        } else if let Some(start_i) = sil_start.take() {
-            if i - start_i >= min_pts {
-                periods.push((
-                    (start_i as f64 / n) * duration,
-                    (i      as f64 / n) * duration,
-                ));
-            }
-        }
-    }
-    // Trailing silence
-    if let Some(start_i) = sil_start {
-        if peaks.len() - start_i >= min_pts {
-            periods.push(((start_i as f64 / n) * duration, duration));
-        }
-    }
-    periods
-}
-
-/// Given a Whisper token (start, end), correct to the actual speech boundary.
-///
-/// Pattern: Whisper places the token *inside* the silence that follows the word.
-/// So: find the silence containing ws → speech resumes at se → find next silence
-/// start → that is the actual word end.
-fn snap_filler_timestamps(
-    ws: f64,
-    we: f64,
-    silence_periods: &[(f64, f64)],
-    duration: f64,
-) -> (f64, f64) {
-    // Phase 1 — does ws fall inside a silence period?
-    for &(ss, se) in silence_periods {
-        if ws >= ss && ws < se {
-            // Actual speech begins when this silence ends
-            let actual_start = se;
-
-            // Find the next silence start after actual_start — that is the word end
-            let mut actual_end = (actual_start + 0.6).min(duration);
-            for &(ns, _) in silence_periods {
-                if ns > actual_start && ns < actual_end {
-                    actual_end = ns;
-                }
-            }
-
-            let actual_end = actual_end.max(actual_start + 0.05);
-            return (actual_start, actual_end);
-        }
-    }
-
-    // Phase 2 — ws is not in silence; trim if we overshoots into one
-    for &(ss, _) in silence_periods {
-        if we > ss && ws < ss {
-            return (ws, ss.max(ws + 0.05));
-        }
-    }
-
-    // Timestamps look fine — return as-is
-    (ws, we)
-}
-
-// ---------------------------------------------------------------------------
-
 fn resolve_paths() -> Result<(PathBuf, PathBuf), String> {
     // Check workspace root relative to execution or common dirs
     let base_candidates = vec![
@@ -174,13 +91,16 @@ fn resolve_paths() -> Result<(PathBuf, PathBuf), String> {
 
     for base in base_candidates {
         let whisper_bin = base.join(r"binaries\Release\whisper-cli.exe");
-        let model_path = base.join(r"models\ggml-base.en.bin");
+        let model_path = ["ggml-small.en.bin", "ggml-base.en.bin"].iter()
+            .map(|name| base.join("models").join(name))
+            .find(|path| path.exists())
+            .unwrap_or_else(|| base.join("models/ggml-small.en.bin"));
         if whisper_bin.exists() && model_path.exists() {
             return Ok((whisper_bin, model_path));
         }
     }
 
-    Err("Could not locate whisper-cli.exe or ggml-base.en.bin in binaries/models folder.".into())
+    Err("Could not locate whisper-cli.exe or an English model (ggml-small.en.bin or ggml-base.en.bin) in binaries/models folder.".into())
 }
 
 #[tauri::command]
@@ -327,6 +247,15 @@ async fn analyze_audio(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
 
 fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
     use tauri::Emitter;
+    analyze_file(path, |percent, stage| {
+        let _ = app.emit("analysis-progress", ProgressPayload {
+            percent, stage: stage.to_string(),
+        });
+    })
+}
+
+/// The desktop and the command-line regression runner share the same pipeline.
+pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<AnalysisResult, String> {
     use std::io::{BufRead, BufReader};
 
     // Reset cancel state
@@ -334,20 +263,16 @@ fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
         *cancel = false;
     }
 
-    let emit_prog = |percent: f64, stage: &str| {
-        let _ = app.emit("analysis-progress", ProgressPayload {
-            percent,
-            stage: stage.to_string(),
-        });
-    };
-
     emit_prog(2.0, "Inspecting media metadata...");
 
     let meta = inspect_media(path.clone())?;
     let (whisper_bin, model_path) = resolve_paths()?;
 
-    let cache_dir = PathBuf::from(r"D:\scratch\Remove words\cache");
-    let _ = std::fs::create_dir_all(&cache_dir);
+    let run_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?.as_nanos();
+    let cache_dir = std::env::temp_dir().join("speech-cleaner")
+        .join(format!("analysis-{}-{run_id}", std::process::id()));
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Create analysis cache: {e}"))?;
 
     let temp_wav = cache_dir.join("current_analysis.wav");
     let preview_wav = cache_dir.join("current_preview.wav");
@@ -426,7 +351,10 @@ fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
         "-of", out_stem.to_str().unwrap(),
         "-pp",
         "-wt", "0.01",
-        "--prompt", "Um, uh, erm, ah, er, hesitation, filler words, stuttering, pause.",
+        // A transcript-style example preserves disfluencies. A list of keywords
+        // is not a verbatim transcript, and an initial-only prompt fades on long files.
+        "--carry-initial-prompt",
+        "--prompt", "Umm, let me think, uh, well, erm, you know. Er, I mean, um, okay. Uh, so, umm, this is, err, an example.",
     ]);
     whisper_cmd.stdout(std::process::Stdio::piped());
     whisper_cmd.stderr(std::process::Stdio::piped());
@@ -499,10 +427,7 @@ fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
     loop {
         // Forward any queued progress events to the UI
         while let Ok((pct, stage)) = prog_rx.try_recv() {
-            let _ = app.emit("analysis-progress", ProgressPayload {
-                percent: pct,
-                stage,
-            });
+            emit_prog(pct, &stage);
         }
 
         // Check if whisper finished
@@ -511,10 +436,7 @@ fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
                 whisper_exit_status = status;
                 // Drain any remaining progress events
                 while let Ok((pct, stage)) = prog_rx.try_recv() {
-                    let _ = app.emit("analysis-progress", ProgressPayload {
-                        percent: pct,
-                        stage,
-                    });
+                    emit_prog(pct, &stage);
                 }
                 break;
             }
@@ -558,102 +480,8 @@ fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
     let parsed: WhisperOutput = serde_json::from_str(&json_text)
         .map_err(|e| format!("Failed to parse whisper json: {}", e))?;
 
-    // Comprehensive filler target list
-    let filler_targets = [
-        "um", "umm", "uh", "uhh", "erm", "err", "er", "ah", "ahh", "hmm", "hm"
-    ];
-    let mut fillers: Vec<FillerItem> = Vec::new();
-    let mut id_counter = 1u32;
-
-    for seg in &parsed.transcription {
-        let seg_start  = seg.offsets.from as f64 / 1000.0;
-        let seg_end    = seg.offsets.to   as f64 / 1000.0;
-        let seg_dur    = (seg_end - seg_start).max(0.0);
-        let mut found_in_tokens = false;
-
-        // ── Layer 1: per-token scan (most precise — uses -wt word timestamps) ──
-        for tok in &seg.tokens {
-            if tok.text.starts_with("[_") { continue; }
-            let tok_clean: String = tok.text
-                .trim().to_lowercase()
-                .chars().filter(|c| c.is_alphabetic()).collect();
-            if !filler_targets.contains(&tok_clean.as_str()) { continue; }
-
-            let t_start = tok.offsets.from as f64 / 1000.0;
-            let mut t_end = tok.offsets.to as f64 / 1000.0;
-            // Use segment start as anchor when token has no real timing
-            let (start, end) = if t_start < 0.01 && t_end < 0.01 {
-                (seg_start, (seg_start + 0.4).min(seg_end.max(seg_start + 0.1)))
-            } else {
-                if (t_end - t_start).abs() < 0.01 { t_end = t_start + 0.35; }
-                (t_start, t_end)
-            };
-
-            fillers.push(FillerItem {
-                id: format!("filler_{}", id_counter),
-                word: tok_clean,
-                start,
-                end,
-                confidence: tok.p,
-                enabled: true,
-            });
-            id_counter += 1;
-            found_in_tokens = true;
-        }
-
-        if found_in_tokens { continue; }
-
-        // ── Layer 2: word-by-word text scan (catches fillers in multi-word
-        //    segments when token data has no per-word timestamps) ──────────────
-        let words: Vec<&str> = seg.text.split_whitespace().collect();
-        let word_count = words.len() as f64;
-        let mut found_in_words = false;
-
-        for (i, word) in words.iter().enumerate() {
-            let w_clean: String = word.to_lowercase()
-                .chars().filter(|c| c.is_alphabetic()).collect();
-            if !filler_targets.contains(&w_clean.as_str()) { continue; }
-
-            // Distribute timing proportionally across the segment
-            let frac  = i as f64 / word_count.max(1.0);
-            let start = seg_start + frac * seg_dur;
-            let end   = (start + 0.4).min(seg_end.max(start + 0.05));
-
-            fillers.push(FillerItem {
-                id: format!("filler_{}", id_counter),
-                word: w_clean,
-                start,
-                end,
-                // Lower confidence because timing is estimated not measured
-                confidence: 0.72,
-                enabled: true,
-            });
-            id_counter += 1;
-            found_in_words = true;
-        }
-
-        if found_in_words { continue; }
-
-        // ── Layer 3: whole-segment match (segment text IS the filler word) ────
-        let seg_clean: String = seg.text.trim().to_lowercase()
-            .chars().filter(|c| c.is_alphabetic()).collect();
-        if filler_targets.contains(&seg_clean.as_str()) {
-            let valid: Vec<_> = seg.tokens.iter()
-                .filter(|t| !t.text.starts_with("[_")).collect();
-            let avg_p = if !valid.is_empty() {
-                valid.iter().map(|t| t.p).sum::<f64>() / valid.len() as f64
-            } else { 0.85 };
-            fillers.push(FillerItem {
-                id: format!("filler_{}", id_counter),
-                word: seg_clean,
-                start: seg_start,
-                end: seg_end,
-                confidence: avg_p,
-                enabled: true,
-            });
-            id_counter += 1;
-        }
-    }
+    let mut fillers = fillers::detect_fillers(&parsed, meta.duration);
+    fillers::refine_timestamps(&mut fillers, &temp_wav, meta.duration)?;
 
     emit_prog(96.0, "Extracting audio waveform geometry...");
 
@@ -690,22 +518,6 @@ fn analyze_audio_inner(app: tauri::AppHandle, path: String) -> Result<AnalysisRe
     // Fallback if wav read was empty
     if peaks.is_empty() {
         peaks = vec![0.3; 200];
-    }
-
-    // -----------------------------------------------------------------------
-    // Correct Whisper token timestamps using silence-period analysis.
-    // Whisper's per-token timestamps are often placed inside the silence that
-    // follows the word.  The actual speech onset is right after that silence.
-    // -----------------------------------------------------------------------
-    let silence_periods = find_silence_from_peaks(&peaks, meta.duration, 0.12);
-
-    for filler in &mut fillers {
-        let (cs, ce) = snap_filler_timestamps(
-            filler.start, filler.end, &silence_periods, meta.duration
-        );
-        // Round to ms precision to keep display values clean
-        filler.start = (cs * 1000.0).round() / 1000.0;
-        filler.end   = (ce * 1000.0).round() / 1000.0;
     }
 
     emit_prog(100.0, "Analysis complete!");

@@ -20,7 +20,7 @@ A self-contained desktop application that automatically detects filler speech so
 - **Desktop Framework:** Tauri 2 (Rust)
 - **Frontend:** Vanilla TypeScript, Vite, CSS (Glassmorphism Dark Theme)
 - **Package Manager:** `pnpm`
-- **Speech Engine:** `whisper.cpp` + `ggml-base.en.bin`
+- **Speech Engine:** `whisper.cpp` + `ggml-small.en.bin` (preferred), with `ggml-base.en.bin` as a fallback
 - **Media Engine:** FFmpeg & FFprobe
 
 ---
@@ -35,10 +35,12 @@ A self-contained desktop application that automatically detects filler speech so
 ### 2. Setup Binaries & Model
 1. Place `whisper-cli.exe` and its runtime DLLs in `binaries/Release/`:
    - Download from [whisper.cpp Releases](https://github.com/ggerganov/whisper.cpp/releases) (`whisper-bin-x64.zip`).
-2. Download the base English model to `models/ggml-base.en.bin`:
+2. Install the preferred small English model (488 MB, verified SHA-256):
    ```powershell
-   curl.exe -L -o "models\ggml-base.en.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+   .\scripts\setup-model.ps1
    ```
+
+   Existing installations with only `models/ggml-base.en.bin` still work. The small model improves filler recognition at the cost of longer analysis. Models run locally after installation.
 
 ### 3. Build & Run Desktop App
 ```powershell
@@ -55,7 +57,21 @@ The executable is generated at:
 `speech-cleaner-app/src-tauri/target/release/speech-cleaner-app.exe`
 
 ### 4. Running the CLI Verification Benchmark
-A standalone CLI verification tool is provided to test speech recognition accuracy against `Speech_Cleaner_Test.mp4` and `Speech_Cleaner_Test_Ground_Truth.json`:
+
+To exercise the **same analysis pipeline as the desktop application**, without exporting or modifying the input:
+
+```powershell
+cd speech-cleaner-app/src-tauri
+cargo test --lib
+cargo test --test media_regression -- --ignored
+cargo run --release --example analyze -- "C:\path\to\video.mp4" result.json
+```
+
+The JSON includes every filler candidate and its selected state. The recognizer uses examples of hesitant speech and carries that prompt throughout long recordings. Matching reassembles subword tokens, preserves repeated occurrences, and accepts elongated spellings such as `ummmm` and `errrr`. Timestamp refinement uses 10 ms audio frames, independently of the display waveform. Candidates with estimated timing remain unselected for manual review.
+
+Review detections before export: a higher detection count does not establish recall or precision, and Whisper can still omit or misrecognize sounds. The supplied ground-truth fixture can check the five known fillers in `Speech_Cleaner_Test.mp4`; the longer recording requires human annotations to measure recall.
+
+The original milestone CLI is also available below. It retains the original base-model settings; use the commands above to validate current desktop behavior:
 ```powershell
 cd speech_cleaner_cli
 cargo run
