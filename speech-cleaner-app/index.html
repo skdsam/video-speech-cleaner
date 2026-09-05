@@ -26,6 +26,14 @@
       </div>
 
       <div class="header-right">
+        <button id="aboutBtn" class="header-action-btn" title="About Speech Cleaner" aria-label="About Speech Cleaner">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M12 16v-4"></path>
+            <path d="M12 8h.01"></path>
+          </svg>
+          <span>About</span>
+        </button>
         <div class="header-status">
           <span class="status-dot"></span>
           <span id="engineStatusLabel">Local Engine Ready</span>
@@ -341,6 +349,99 @@
         </button>
       </section>
     </main>
+ 
+    <!-- About Modal Dialog -->
+    <div id="aboutModal" class="modal-backdrop" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="aboutDialogTitle">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="about-brand-row">
+            <div class="brand-icon modal-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" x2="12" y1="19" y2="22"/>
+              </svg>
+            </div>
+            <div>
+              <div class="about-title-wrap">
+                <h2 id="aboutDialogTitle" class="about-title">Speech Cleaner</h2>
+                <span id="aboutAppVersion" class="about-version-badge">v1.0.0</span>
+              </div>
+              <p class="about-author">Created by <strong>SkdSam</strong></p>
+            </div>
+          </div>
+          <button id="closeAboutModalBtn" class="modal-close-btn" aria-label="Close dialog" title="Close (Esc)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <p class="about-description">
+            A self-contained desktop application that automatically detects filler speech sounds
+            (<em>um</em>, <em>umm</em>, <em>uh</em>, <em>uhh</em>, <em>erm</em>, <em>err</em>, <em>er</em>)
+            in video and audio recordings using local Whisper AI, and mutes those exact regions
+            with sample-accurate precision without re-encoding video streams.
+          </p>
+
+          <div class="about-feature-grid">
+            <div class="about-feature-item">
+              <div class="feature-bullet"></div>
+              <div>
+                <strong>100% Offline &amp; Private</strong>
+                <span>All analysis runs locally via Whisper GGML models. No cloud APIs, telemetry, or subscriptions.</span>
+              </div>
+            </div>
+            <div class="about-feature-item">
+              <div class="feature-bullet"></div>
+              <div>
+                <strong>Zero Video Degradation</strong>
+                <span>Preserves original video quality, bitrate, and resolution using 1:1 stream copying (<code>-c:v copy</code>).</span>
+              </div>
+            </div>
+            <div class="about-feature-item">
+              <div class="feature-bullet"></div>
+              <div>
+                <strong>Audio-Video Synchronization</strong>
+                <span>Exact timeline preservation with configurable micro-fades and safety padding.</span>
+              </div>
+            </div>
+            <div class="about-feature-item">
+              <div class="feature-bullet"></div>
+              <div>
+                <strong>Interactive Waveform Studio</strong>
+                <span>Zoomable waveform visualization, confidence scores, snippet previews, and selective toggle review.</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="about-meta-footer">
+            <div class="about-meta-row">
+              <span class="meta-label">Framework</span>
+              <span class="meta-value">Tauri 2 + Rust + TypeScript</span>
+            </div>
+            <div class="about-meta-row">
+              <span class="meta-label">Speech Engine</span>
+              <span class="meta-value">whisper.cpp + GGML Speech Models</span>
+            </div>
+            <div class="about-meta-row">
+              <span class="meta-label">Media Pipeline</span>
+              <span class="meta-value">FFmpeg &amp; FFprobe</span>
+            </div>
+            <div class="about-meta-row">
+              <span class="meta-label">License</span>
+              <span class="meta-value">MIT License</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="aboutOkBtn" class="btn btn-primary" style="min-width: 90px;">Got it</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

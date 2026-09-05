@@ -2,6 +2,7 @@ import { PlaybackMutes, muteIntervals } from "./playback-mutes";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 
 interface MediaMetadata {
   file_name: string;
@@ -1893,3 +1894,56 @@ window.addEventListener("DOMContentLoaded", async () => {
     // If not found, stay on file drop screen
   }
 });
+
+// -------------------------------------------------------------
+// About Modal Dialog Management
+// -------------------------------------------------------------
+const aboutBtn = document.getElementById("aboutBtn") as HTMLButtonElement | null;
+const aboutModal = document.getElementById("aboutModal") as HTMLElement | null;
+const closeAboutModalBtn = document.getElementById("closeAboutModalBtn") as HTMLButtonElement | null;
+const aboutOkBtn = document.getElementById("aboutOkBtn") as HTMLButtonElement | null;
+const aboutAppVersion = document.getElementById("aboutAppVersion") as HTMLElement | null;
+
+async function initAboutModal() {
+  if (aboutAppVersion) {
+    try {
+      const ver = await getVersion();
+      if (ver) {
+        aboutAppVersion.textContent = `v${ver}`;
+      }
+    } catch {
+      aboutAppVersion.textContent = "v1.0.0";
+    }
+  }
+
+  function openAbout() {
+    if (!aboutModal) return;
+    aboutModal.style.display = "flex";
+    aboutOkBtn?.focus();
+  }
+
+  function closeAbout() {
+    if (!aboutModal) return;
+    aboutModal.style.display = "none";
+    aboutBtn?.focus();
+  }
+
+  aboutBtn?.addEventListener("click", openAbout);
+  closeAboutModalBtn?.addEventListener("click", closeAbout);
+  aboutOkBtn?.addEventListener("click", closeAbout);
+
+  aboutModal?.addEventListener("click", (e) => {
+    if (e.target === aboutModal) {
+      closeAbout();
+    }
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && aboutModal && aboutModal.style.display !== "none") {
+      closeAbout();
+    }
+  });
+}
+
+initAboutModal();
+
