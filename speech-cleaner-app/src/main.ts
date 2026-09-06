@@ -1887,9 +1887,13 @@ window.addEventListener("resize", () => {
 
 // Automatically load the test file if present in dev environment
 window.addEventListener("DOMContentLoaded", async () => {
+  let dependenciesReady = true;
   try {
     const missing = await invoke<string[]>("check_dependencies");
     if (missing.length > 0) {
+      dependenciesReady = false;
+      dropSection.style.display = "none";
+      selectFileBtn.disabled = true;
       const accepted = window.confirm(
         `Speech Cleaner needs to download its processing components before first use:\n\n` +
         `${missing.map((item) => `• ${item}`).join("\n")}\n\n` +
@@ -1897,21 +1901,55 @@ window.addEventListener("DOMContentLoaded", async () => {
       );
       if (accepted) {
         engineStatusLabel.textContent = "Installing processing components…";
-        await invoke("install_dependencies");
+        progressSection.style.display = "flex";
+        cancelAnalysisBtn.style.display = "none";
+        progressStatus.textContent = "Preparing component installation…";
+        progressPercent.textContent = "0%";
+        progressBar.style.width = "0%";
+        const unlistenDependencyProgress = await listen<ProgressPayload>("dependency-progress", (event) => {
+          const percent = Math.max(0, Math.min(100, Math.round(event.payload.percent)));
+          progressStatus.textContent = event.payload.stage;
+          progressPercent.textContent = `${percent}%`;
+          progressBar.style.width = `${percent}%`;
+        });
+        try {
+          await invoke("install_dependencies");
+        } finally {
+          unlistenDependencyProgress();
+          cancelAnalysisBtn.style.display = "";
+        }
         const remaining = await invoke<string[]>("check_dependencies");
         if (remaining.length > 0) {
           throw new Error(`Still missing: ${remaining.join(", ")}`);
         }
+        dependenciesReady = true;
+        dropSection.style.display = "flex";
+        selectFileBtn.disabled = false;
         engineStatusLabel.textContent = "Engine Ready";
+        progressStatus.textContent = "Processing components are ready.";
+        progressPercent.textContent = "100%";
+        progressBar.style.width = "100%";
+        window.setTimeout(() => { progressSection.style.display = "none"; }, 1200);
         window.alert("Speech Cleaner is ready to use.");
       } else {
         engineStatusLabel.textContent = "Setup Required";
+        progressSection.style.display = "flex";
+        cancelAnalysisBtn.style.display = "none";
+        progressStatus.textContent = "Processing components are required before importing media. Restart to install.";
+        progressPercent.textContent = "Required";
+        progressBar.style.width = "0%";
       }
     }
   } catch (error) {
     engineStatusLabel.textContent = "Setup Failed";
+    progressSection.style.display = "flex";
+    progressStatus.textContent = "Component installation failed. Restart to retry.";
+    progressPercent.textContent = "Error";
+    progressBar.style.width = "0%";
     window.alert(`Speech Cleaner could not install its processing components.\n\n${String(error)}\n\nRestart the app to try again.`);
   }
+
+  if (!dependenciesReady) return;
 
   const testFile = "D:\\scratch\\Remove words\\Speech_Cleaner_Test.mp4";
   try {

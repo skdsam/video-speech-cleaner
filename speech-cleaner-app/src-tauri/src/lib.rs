@@ -6,6 +6,16 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,23 +154,44 @@ fn check_dependencies() -> Vec<String> {
 #[tauri::command]
 async fn install_dependencies(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+        use tauri::Emitter;
         let script = app.path().resource_dir()
             .map_err(|e| format!("Could not locate installer resources: {e}"))?
             .join("scripts").join("install-dependencies.ps1");
         let destination = app.path().app_local_data_dir()
             .map_err(|e| format!("Could not locate application data directory: {e}"))?
             .join("dependencies");
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(&script)
-            .arg("-InstallRoot")
-            .arg(&destination)
-            .output()
+        let mut command = background_command("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script).arg("-InstallRoot").arg(&destination)
+            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn()
             .map_err(|e| format!("Could not start dependency installer: {e}"))?;
-        if output.status.success() {
+        let stdout = child.stdout.take().ok_or("Could not read dependency installer progress")?;
+        let mut stderr = child.stderr.take().ok_or("Could not read dependency installer errors")?;
+        let stderr_reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(payload) = line.strip_prefix("PROGRESS|") {
+                let mut fields = payload.splitn(2, '|');
+                if let (Some(percent), Some(stage)) = (fields.next(), fields.next()) {
+                    if let Ok(percent) = percent.parse::<f64>() {
+                        let _ = app.emit("dependency-progress", ProgressPayload { percent, stage: stage.to_string() });
+                    }
+                }
+            }
+        }
+        let status = child.wait().map_err(|e| format!("Dependency installer did not finish correctly: {e}"))?;
+        let error_text = stderr_reader.join().unwrap_or_default();
+        if status.success() {
             Ok(())
         } else {
-            Err(format!("Dependency installation failed: {}", String::from_utf8_lossy(&output.stderr)))
+            Err(format!("Dependency installation failed: {error_text}"))
         }
     }).await.map_err(|e| format!("Dependency installer task failed: {e}"))?
 }
@@ -177,7 +208,7 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
         .unwrap_or_default();
 
     // Probe duration
-    let dur_out = Command::new(media_tool("ffprobe.exe"))
+    let dur_out = background_command(media_tool("ffprobe.exe"))
         .args([
             "-v", "error",
             "-show_entries", "format=duration",
@@ -193,7 +224,7 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
         .unwrap_or(0.0);
 
     // Video stream info
-    let v_out = Command::new(media_tool("ffprobe.exe"))
+    let v_out = background_command(media_tool("ffprobe.exe"))
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -231,7 +262,7 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
     }
 
     // Audio stream info
-    let a_out = Command::new(media_tool("ffprobe.exe"))
+    let a_out = background_command(media_tool("ffprobe.exe"))
         .args([
             "-v", "error",
             "-select_streams", "a:0",
@@ -289,7 +320,7 @@ fn cancel_analysis() -> Result<(), String> {
     if let Ok(mut pid_guard) = ACTIVE_CHILD_PID.lock() {
         if let Some(pid) = *pid_guard {
             // Kill child process on Windows
-            let _ = Command::new("taskkill")
+            let _ = background_command("taskkill")
                 .args(["/F", "/T", "/PID", &pid.to_string() as &str])
                 .output();
             *pid_guard = None;
@@ -348,8 +379,8 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
     }
 
     // Extract 16kHz mono WAV for Whisper with progress tracking
-    let mut ffmpeg_child = Command::new(media_tool("ffmpeg.exe"))
-        .args([
+    let mut ffmpeg_command = background_command(media_tool("ffmpeg.exe"));
+    let mut ffmpeg_child = ffmpeg_command.args([
             "-y",
             "-i", &path,
             "-ar", "16000",
@@ -382,7 +413,7 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
     emit_prog(15.0, "Extracting preview audio track...");
 
     // Extract normalized stereo WAV for frontend playback & waveform peak extraction
-    let _ = Command::new(media_tool("ffmpeg.exe"))
+    let _ = background_command(media_tool("ffmpeg.exe"))
         .args([
             "-y",
             "-i", &path,
@@ -404,7 +435,7 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
 
     // Run Whisper with -pp (print-progress) so we can stream % to the UI,
     // and -wt 0.01 to enable word-level timestamps inside each segment JSON.
-    let mut whisper_cmd = Command::new(&whisper_bin);
+    let mut whisper_cmd = background_command(&whisper_bin);
     whisper_cmd.args([
         "-m", model_path.to_str().unwrap(),
         "-f", temp_wav.to_str().unwrap(),
@@ -592,7 +623,7 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
         format!("volume=enable='{}':volume=0:eval=frame", conditions.join("+"))
     };
 
-    let out = Command::new(media_tool("ffmpeg.exe"))
+    let out = background_command(media_tool("ffmpeg.exe"))
         .args([
             "-y",
             "-i", &req.input_path,
