@@ -666,7 +666,7 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
         .args([
             "-y",
             "-i", &req.input_path,
-            "-filter_script:a", &filter_path.to_string_lossy(),
+            "-/filter:a", &filter_path.to_string_lossy(),
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
