@@ -3,6 +3,7 @@ mod fillers;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -632,21 +633,48 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
                 format!("between(t,{:.3},{:.3})", s, e)
             })
             .collect();
-        format!("volume=enable='{}':volume=0:eval=frame", conditions.join("+"))
+        // Keep each expression small. FFmpeg's expression parser can fail on a
+        // long left-associative sum when a recording contains many fillers.
+        conditions
+            .chunks(64)
+            .map(|chunk| {
+                format!(
+                    "volume=enable='{}':volume=0:eval=frame",
+                    chunk.join("+")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     };
 
-    let out = background_command(media_tool("ffmpeg.exe"))
+    // Do not put the potentially large filter graph on the Windows command
+    // line (which has a hard size limit). FFmpeg reads the same graph from a
+    // temporary script instead.
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let filter_path = std::env::temp_dir().join(format!(
+        "speech-cleaner-filter-{}-{}.txt",
+        std::process::id(),
+        nonce
+    ));
+    std::fs::write(&filter_path, &filter_expr)
+        .map_err(|e| format!("Failed to prepare audio filter: {}", e))?;
+
+    let out_result = background_command(media_tool("ffmpeg.exe"))
         .args([
             "-y",
             "-i", &req.input_path,
-            "-af", &filter_expr,
+            "-filter_script:a", &filter_path.to_string_lossy(),
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
             &req.output_path,
         ])
-        .output()
-        .map_err(|e| format!("Failed to launch ffmpeg: {}", e))?;
+        .output();
+    let _ = std::fs::remove_file(&filter_path);
+    let out = out_result.map_err(|e| format!("Failed to launch ffmpeg: {}", e))?;
 
     if !out.status.success() {
         return Err(format!("Export failed: {}", String::from_utf8_lossy(&out.stderr)));
