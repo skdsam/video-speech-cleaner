@@ -1887,6 +1887,32 @@ window.addEventListener("resize", () => {
 
 // Automatically load the test file if present in dev environment
 window.addEventListener("DOMContentLoaded", async () => {
+  try {
+    const missing = await invoke<string[]>("check_dependencies");
+    if (missing.length > 0) {
+      const accepted = window.confirm(
+        `Speech Cleaner needs to download its processing components before first use:\n\n` +
+        `${missing.map((item) => `• ${item}`).join("\n")}\n\n` +
+        `The download is approximately 700 MB and is installed only for your Windows account. Download now?`
+      );
+      if (accepted) {
+        engineStatusLabel.textContent = "Installing processing components…";
+        await invoke("install_dependencies");
+        const remaining = await invoke<string[]>("check_dependencies");
+        if (remaining.length > 0) {
+          throw new Error(`Still missing: ${remaining.join(", ")}`);
+        }
+        engineStatusLabel.textContent = "Engine Ready";
+        window.alert("Speech Cleaner is ready to use.");
+      } else {
+        engineStatusLabel.textContent = "Setup Required";
+      }
+    }
+  } catch (error) {
+    engineStatusLabel.textContent = "Setup Failed";
+    window.alert(`Speech Cleaner could not install its processing components.\n\n${String(error)}\n\nRestart the app to try again.`);
+  }
+
   const testFile = "D:\\scratch\\Remove words\\Speech_Cleaner_Test.mp4";
   try {
     await loadMediaFile(testFile);

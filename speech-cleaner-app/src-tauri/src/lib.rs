@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 
 
@@ -89,15 +90,19 @@ pub struct ExportRequest {
     pub fade_ms: f64,
 }
 fn resolve_paths() -> Result<(PathBuf, PathBuf), String> {
-    // Check workspace root relative to execution or common dirs
-    let base_candidates = vec![
-        PathBuf::from(r"D:\scratch\Remove words"),
-        PathBuf::from(r"."),
-        std::env::current_dir().unwrap_or_default(),
-    ];
+    let mut base_candidates = Vec::new();
+    if let Some(dependency_dir) = std::env::var_os("SPEECH_CLEANER_DEPENDENCY_DIR") {
+        base_candidates.push(PathBuf::from(dependency_dir));
+    }
+    // Development and regression-test fallbacks.
+    base_candidates.push(PathBuf::from(".."));
+    base_candidates.push(PathBuf::from("."));
+    base_candidates.push(std::env::current_dir().unwrap_or_default());
 
     for base in base_candidates {
-        let whisper_bin = base.join(r"binaries\Release\whisper-cli.exe");
+        let bundled_bin = base.join("binaries").join("whisper-cli.exe");
+        let development_bin = base.join("binaries").join("Release").join("whisper-cli.exe");
+        let whisper_bin = if bundled_bin.exists() { bundled_bin } else { development_bin };
         let model_path = ["ggml-small.en.bin", "ggml-base.en.bin"].iter()
             .map(|name| base.join("models").join(name))
             .find(|path| path.exists())
@@ -108,6 +113,56 @@ fn resolve_paths() -> Result<(PathBuf, PathBuf), String> {
     }
 
     Err("Could not locate whisper-cli.exe or an English model (ggml-small.en.bin or ggml-base.en.bin) in binaries/models folder.".into())
+}
+
+fn media_tool(name: &str) -> PathBuf {
+    if let Some(dependency_dir) = std::env::var_os("SPEECH_CLEANER_DEPENDENCY_DIR") {
+        let installed = PathBuf::from(dependency_dir).join("media").join(name);
+        if installed.exists() {
+            return installed;
+        }
+    }
+    PathBuf::from(name)
+}
+
+#[tauri::command]
+fn check_dependencies() -> Vec<String> {
+    let root = std::env::var_os("SPEECH_CLEANER_DEPENDENCY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let required = [
+        ("Whisper speech engine", root.join("binaries").join("whisper-cli.exe")),
+        ("English speech model", root.join("models").join("ggml-small.en.bin")),
+        ("FFmpeg media engine", root.join("media").join("ffmpeg.exe")),
+        ("FFprobe media inspector", root.join("media").join("ffprobe.exe")),
+    ];
+    required.into_iter()
+        .filter_map(|(label, path)| (!path.exists()).then(|| label.to_string()))
+        .collect()
+}
+
+#[tauri::command]
+async fn install_dependencies(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let script = app.path().resource_dir()
+            .map_err(|e| format!("Could not locate installer resources: {e}"))?
+            .join("scripts").join("install-dependencies.ps1");
+        let destination = app.path().app_local_data_dir()
+            .map_err(|e| format!("Could not locate application data directory: {e}"))?
+            .join("dependencies");
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .arg("-InstallRoot")
+            .arg(&destination)
+            .output()
+            .map_err(|e| format!("Could not start dependency installer: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!("Dependency installation failed: {}", String::from_utf8_lossy(&output.stderr)))
+        }
+    }).await.map_err(|e| format!("Dependency installer task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -122,7 +177,7 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
         .unwrap_or_default();
 
     // Probe duration
-    let dur_out = Command::new("ffprobe")
+    let dur_out = Command::new(media_tool("ffprobe.exe"))
         .args([
             "-v", "error",
             "-show_entries", "format=duration",
@@ -138,7 +193,7 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
         .unwrap_or(0.0);
 
     // Video stream info
-    let v_out = Command::new("ffprobe")
+    let v_out = Command::new(media_tool("ffprobe.exe"))
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -176,7 +231,7 @@ fn inspect_media(path: String) -> Result<MediaMetadata, String> {
     }
 
     // Audio stream info
-    let a_out = Command::new("ffprobe")
+    let a_out = Command::new(media_tool("ffprobe.exe"))
         .args([
             "-v", "error",
             "-select_streams", "a:0",
@@ -293,7 +348,7 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
     }
 
     // Extract 16kHz mono WAV for Whisper with progress tracking
-    let mut ffmpeg_child = Command::new("ffmpeg")
+    let mut ffmpeg_child = Command::new(media_tool("ffmpeg.exe"))
         .args([
             "-y",
             "-i", &path,
@@ -327,7 +382,7 @@ pub fn analyze_file(path: String, emit_prog: impl Fn(f64, &str)) -> Result<Analy
     emit_prog(15.0, "Extracting preview audio track...");
 
     // Extract normalized stereo WAV for frontend playback & waveform peak extraction
-    let _ = Command::new("ffmpeg")
+    let _ = Command::new(media_tool("ffmpeg.exe"))
         .args([
             "-y",
             "-i", &path,
@@ -537,7 +592,7 @@ fn export_video(req: ExportRequest) -> Result<String, String> {
         format!("volume=enable='{}':volume=0:eval=frame", conditions.join("+"))
     };
 
-    let out = Command::new("ffmpeg")
+    let out = Command::new(media_tool("ffmpeg.exe"))
         .args([
             "-y",
             "-i", &req.input_path,
@@ -564,8 +619,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let resource_dir = app.path().resource_dir()?;
+            std::env::set_var("SPEECH_CLEANER_RESOURCE_DIR", resource_dir);
+            let dependency_dir = app.path().app_local_data_dir()?.join("dependencies");
+            std::env::set_var("SPEECH_CLEANER_DEPENDENCY_DIR", dependency_dir);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             inspect_media,
+            check_dependencies,
+            install_dependencies,
             analyze_audio,
             cancel_analysis,
             export_video
