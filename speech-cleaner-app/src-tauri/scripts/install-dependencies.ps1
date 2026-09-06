@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName System.Net.Http
 $modelHash = 'C6138D6D58ECC8322097E0F987C32F1BE8BB0A18532A3F88F734D1BBF9C41E5D'
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("speech-cleaner-install-" + [guid]::NewGuid())
@@ -23,7 +24,7 @@ function Get-Download([string]$Uri, [string]$Destination, [string]$Label, [int]$
     $outputStream = $null
     try {
         $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-        $response.EnsureSuccessStatusCode()
+        $null = $response.EnsureSuccessStatusCode()
         $total = $response.Content.Headers.ContentLength
         Send-Progress $StartPercent "Starting $Label downloadâ€¦"
         $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
@@ -31,18 +32,24 @@ function Get-Download([string]$Uri, [string]$Destination, [string]$Label, [int]$
         $buffer = New-Object byte[] (1MB)
         [long]$received = 0
         $lastPercent = -1
+        $updateClock = [System.Diagnostics.Stopwatch]::StartNew()
         while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $outputStream.Write($buffer, 0, $read)
             $received += $read
             if ($total -gt 0) {
                 $fraction = $received / $total
                 $percent = [math]::Floor($StartPercent + (($EndPercent - $StartPercent) * $fraction))
-                if ($percent -ne $lastPercent) {
+                if ($percent -ne $lastPercent -or $updateClock.ElapsedMilliseconds -ge 500) {
                     $megabytes = [math]::Round($received / 1MB)
                     $totalMegabytes = [math]::Round($total / 1MB)
                     Send-Progress $percent "Downloading $Label ($megabytes of $totalMegabytes MB)…"
                     $lastPercent = $percent
+                    $updateClock.Restart()
                 }
+            } elseif ($updateClock.ElapsedMilliseconds -ge 500) {
+                $megabytes = [math]::Round($received / 1MB, 1)
+                Send-Progress $StartPercent "Downloading $Label ($megabytes MB received; total size unavailable)"
+                $updateClock.Restart()
             }
         }
         Send-Progress $EndPercent "Finished downloading $Label."

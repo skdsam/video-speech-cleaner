@@ -176,7 +176,19 @@ async fn install_dependencies(app: tauri::AppHandle) -> Result<(), String> {
             let _ = stderr.read_to_string(&mut text);
             text
         });
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let mut reader = BufReader::new(stdout);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {},
+                Err(error) => return Err(format!("Could not read installation progress: {error}")),
+            }
+            // Legacy PowerShell output may contain non-UTF-8 bytes. Never stop
+            // consuming progress because a stage label contains one such byte.
+            let line = String::from_utf8_lossy(&bytes);
+            let line = line.trim();
             if let Some(payload) = line.strip_prefix("PROGRESS|") {
                 let mut fields = payload.splitn(2, '|');
                 if let (Some(percent), Some(stage)) = (fields.next(), fields.next()) {
