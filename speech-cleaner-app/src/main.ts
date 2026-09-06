@@ -1939,6 +1939,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         progressPercent.textContent = "Required";
         progressBar.style.width = "0%";
       }
+    } else {
+      dropSection.style.display = "flex";
+      selectFileBtn.disabled = false;
     }
   } catch (error) {
     engineStatusLabel.textContent = "Setup Failed";
